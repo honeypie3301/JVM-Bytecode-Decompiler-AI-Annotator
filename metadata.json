@@ -1,0 +1,6 @@
+{
+  "name": "JVM Bytecode Decompiler & AI Annotator",
+  "description": "An advanced binary .class file decompiler that disassembles Java bytecode and uses Gemini to reconstruct highly readable, beautifully annotated Java source code.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
