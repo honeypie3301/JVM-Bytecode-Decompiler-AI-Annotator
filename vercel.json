@@ -1,0 +1,9 @@
+{
+  "cleanUrls": true,
+  "rewrites": [
+    {
+      "source": "/api/decompile",
+      "destination": "/api/decompile.ts"
+    }
+  ]
+}

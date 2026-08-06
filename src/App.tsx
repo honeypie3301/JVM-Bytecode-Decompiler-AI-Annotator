@@ -250,8 +250,9 @@ Core Requirements:
 Ensure the output is strictly valid JSON in the response, matching the JSON schema. Do not enclose the JSON inside a markdown block like \`\`\`json.
 `;
 
-        const modelName = "gemini-3.6-flash";
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${userApiKey}`;
+        const modelName = "gemini-2.5-flash";
+        const trimmedKey = userApiKey.trim();
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${trimmedKey}`;
         
         const response = await fetch(url, {
           method: "POST",
@@ -317,7 +318,13 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
           throw new Error("Empty response from client-side Gemini API.");
         }
         
-        data = JSON.parse(textContent);
+        try {
+          data = JSON.parse(textContent.trim());
+        } catch (parseError) {
+          console.warn("Standard JSON.parse failed on client response, attempting cleanup:", parseError);
+          const cleanJsonStr = textContent.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
+          data = JSON.parse(cleanJsonStr);
+        }
       } else {
         // Fallback to Express backend decompile endpoint
         const res = await fetch("/api/decompile", {
@@ -1074,6 +1081,21 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
                               </div>
                             </div>
                           </div>
+                        </div>
+                      ) : activeFile?.status === "failed" ? (
+                        <div className="flex-1 flex flex-col items-center justify-center border border-red-950/30 bg-[#0E0E12] rounded-xl p-8 min-h-[300px]">
+                          <AlertCircle className="w-10 h-10 text-red-400 mb-3" />
+                          <h4 className="text-sm font-bold font-mono text-white">Decompilation Failed</h4>
+                          <p className="text-xs text-red-400/80 font-mono mt-2 text-center max-w-md bg-red-950/10 p-3 rounded-lg border border-red-900/20 leading-relaxed whitespace-pre-wrap select-text">
+                            {activeFile?.error || "An unknown error occurred during AI reconstruction."}
+                          </p>
+                          <button
+                            onClick={() => decompileFile(activeFile.id)}
+                            className="mt-5 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-xs font-bold font-mono text-white transition flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            Retry Decompilation
+                          </button>
                         </div>
                       ) : (
                         <div className="flex-1 flex flex-col items-center justify-center border border-[#23232A] bg-[#0E0E12] rounded-xl p-12">

@@ -96,7 +96,7 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
 `;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.6-flash",
+        model: "gemini-2.5-flash",
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -193,7 +193,7 @@ Answer the user's questions about this class, explain specific bytecode structur
 `;
 
       const chat = ai.chats.create({
-        model: "gemini-3.6-flash",
+        model: "gemini-2.5-flash",
         config: {
           systemInstruction: chatContext,
         },
