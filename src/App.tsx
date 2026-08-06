@@ -250,7 +250,7 @@ Core Requirements:
 Ensure the output is strictly valid JSON in the response, matching the JSON schema. Do not enclose the JSON inside a markdown block like \`\`\`json.
 `;
 
-        const modelName = "gemini-2.5-flash";
+        const modelName = "gemini-3.6-flash";
         const trimmedKey = userApiKey.trim();
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${trimmedKey}`;
         

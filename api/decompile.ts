@@ -102,7 +102,7 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
 `;
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
