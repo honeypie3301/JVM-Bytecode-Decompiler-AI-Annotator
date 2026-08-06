@@ -250,7 +250,7 @@ Core Requirements:
 Ensure the output is strictly valid JSON in the response, matching the JSON schema. Do not enclose the JSON inside a markdown block like \`\`\`json.
 `;
 
-        const modelName = "gemini-2.5-flash";
+        const modelName = "gemini-3.6-flash";
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${userApiKey}`;
         
         const response = await fetch(url, {
@@ -423,16 +423,30 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
       {/* Header */}
       <header className="border-b border-[#23232A] bg-[#121217] sticky top-0 z-50 shrink-0">
         <div className="w-full max-w-full px-6 py-2.5 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 bg-[#5C5C66] rounded flex items-center justify-center shadow-md shadow-zinc-800/40">
-              <Code className="text-white w-4 h-4" />
+          <div className="flex items-center gap-3.5">
+            <div className="w-9 h-9 flex items-center justify-center shrink-0">
+              <svg viewBox="0 0 100 100" className="w-9 h-9 text-emerald-400" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <polygon points="50,5 90,25 90,75 50,95 10,75 10,25" stroke="currentColor" strokeWidth="4.5" strokeLinejoin="round" fill="url(#brandGrad)" />
+                <path d="M25,40 H45 L50,45" stroke="currentColor" strokeWidth="2" strokeLinecap="round" opacity="0.4" />
+                <path d="M75,40 H55 L50,45" stroke="currentColor" strokeWidth="2" strokeLinecap="round" opacity="0.4" />
+                <path d="M50,45 V75" stroke="currentColor" strokeWidth="2" strokeLinecap="round" opacity="0.4" />
+                <path d="M35,46 L23,54 L35,62" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M65,46 L77,54 L65,62" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M50,28 Q50,45 67,45 Q50,45 50,62 Q50,45 33,45 Q50,45 50,28 Z" fill="currentColor" />
+                <defs>
+                  <radialGradient id="brandGrad" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stopColor="#102E1B" />
+                    <stop offset="100%" stopColor="#0B0B0E" />
+                  </radialGradient>
+                </defs>
+              </svg>
             </div>
             <div>
-              <h1 className="font-semibold tracking-tight text-base text-white">
-                Class <span className="text-zinc-400">Decompiler</span>
+              <h1 className="font-bold tracking-tight text-lg text-white leading-none">
+                Jad<span className="text-emerald-400">AI</span>
               </h1>
-              <p className="text-[9px] text-[#5C5C66] font-mono hidden sm:block uppercase tracking-wider">
-                Multi-File JVM Parser & AI Reconstruction
+              <p className="text-[9px] text-[#5C5C66] font-mono hidden sm:block uppercase tracking-widest mt-1">
+                Intelligent JVM Decompiler & Annotator
               </p>
             </div>
           </div>
@@ -556,7 +570,7 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
               </div>
 
               <h3 className="text-base font-semibold tracking-tight mb-2 text-white">
-                Bulk JVM Class Decompiler
+                JadAI JVM Decompiler
               </h3>
               <p className="text-xs text-[#90909A] max-w-sm mx-auto mb-4 leading-relaxed">
                 Drag & drop your compiled <code className="text-zinc-300 font-mono">.class</code> files here or click to browse. Easily upload multiple class files and decompile them.
