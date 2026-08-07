@@ -788,56 +788,6 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
               </div>
             </div>
 
-            {/* Quick Pre-compiled Sample Selector */}
-            <div className="w-full mt-4 p-4 bg-[#0E0E12] border border-[#23232A] rounded-xl text-left">
-              <div className="flex items-center justify-between mb-2.5">
-                <span className="text-[11px] font-mono font-bold text-zinc-300 flex items-center gap-1.5">
-                  <FileCode className="w-3.5 h-3.5 text-emerald-400" /> Test Samples (Real-Time Telemetry)
-                </span>
-                <span className="text-[10px] font-mono text-[#5C5C66]">Click to load & broadcast live event</span>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                {SAMPLES.map((sample) => (
-                  <button
-                    key={sample.id}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      loadSampleClass(sample);
-                    }}
-                    className="p-2.5 bg-[#14141A] hover:bg-[#1A1A22] border border-[#23232A] hover:border-emerald-500/40 rounded-lg text-left transition group cursor-pointer"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-mono font-semibold text-white group-hover:text-emerald-300 transition">
-                        {sample.name}
-                      </span>
-                      <Play className="w-3 h-3 text-[#5C5C66] group-hover:text-emerald-400 transition shrink-0" />
-                    </div>
-                    <p className="text-[10px] text-[#90909A] mt-1 line-clamp-2 leading-snug">
-                      {sample.description}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* AI Decompiler Features list */}
-            <div className="mt-12 border-t border-[#23232A] pt-6 w-full grid grid-cols-1 md:grid-cols-2 gap-4 text-[#90909A] text-[11px]">
-              <div className="flex gap-2.5">
-                <Terminal className="w-4 h-4 text-zinc-400 shrink-0 mt-0.5" />
-                <div>
-                  <h5 className="font-bold text-white mb-0.5">High-Speed Binary Parser</h5>
-                  <p className="leading-relaxed text-[#5C5C66]">Instantly extracts constant pool references, field descriptors, and modifiers from bytecode. Disassembles raw JVM opcodes on the fly.</p>
-                </div>
-              </div>
-              <div className="flex gap-2.5">
-                <Sparkles className="w-4 h-4 text-zinc-400 shrink-0 mt-0.5" />
-                <div>
-                  <h5 className="font-bold text-white mb-0.5">AI Source Reconstruction</h5>
-                  <p className="leading-relaxed text-[#5C5C66]">Leverages Gemini flash to reverse-engineer high-fidelity, compilation-ready Java code, automatically recovering conditional loops and MCreator patterns.</p>
-                </div>
-              </div>
-            </div>
-
           </div>
         ) : (
           
