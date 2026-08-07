@@ -1,0 +1,54 @@
+{
+  "entities": {
+    "TelemetryLog": {
+      "title": "Telemetry Log",
+      "description": "Global file submission and threat detection event logged when JVM class files are uploaded",
+      "type": "object",
+      "properties": {
+        "fileName": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Name of the uploaded class file"
+        },
+        "className": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Parsed JVM class name"
+        },
+        "fileSize": {
+          "type": "number",
+          "description": "File size in bytes"
+        },
+        "flagged": {
+          "type": "boolean",
+          "description": "True if class matches protected mod 'the_backwoods'"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Reason for flagging if protected"
+        },
+        "clientToken": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Masked IP or telemetry token"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "Formatted timestamp string"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Timestamp epoch in millis for sorting"
+        }
+      },
+      "required": ["fileName", "className", "fileSize", "flagged", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/telemetry_logs/{logId}": {
+      "schema": "TelemetryLog",
+      "description": "Global collection storing bytecode upload and security audit telemetry events"
+    }
+  }
+}

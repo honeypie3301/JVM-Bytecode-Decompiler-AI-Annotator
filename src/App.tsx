@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { parseClassFile, ParsedClass, getJdkVersion } from "./classParser";
+import { subscribeToTelemetry, logTelemetryEvent, FirestoreTelemetryLog } from "./lib/firebase";
 
 export interface DecompilerFile {
   id: string;
@@ -89,27 +90,43 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Secret Audit Telemetry State (Stored locally in browser cache)
-  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>(() => {
-    try {
-      const saved = localStorage.getItem("jadai_audit_stream");
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  // Global Firebase Audit Telemetry State
+  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
   const [showAuditModal, setShowAuditModal] = useState(false);
   const [showThreatModal, setShowThreatModal] = useState<AuditLogItem | null>(null);
 
+  // Subscribe to real-time Firebase telemetry logs
+  useEffect(() => {
+    const unsubscribe = subscribeToTelemetry((firebaseLogs) => {
+      const formatted: AuditLogItem[] = firebaseLogs.map((l) => ({
+        id: l.id || Math.random().toString(36).substring(7),
+        timestamp: l.timestamp || new Date().toLocaleTimeString(),
+        fileName: l.fileName,
+        className: l.className,
+        fileSize: l.fileSize,
+        flagged: l.flagged,
+        reason: l.reason,
+        ipPlaceholder: l.clientToken || "10.84.x.x"
+      }));
+      setAuditLogs(formatted);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
   const addAuditLog = (item: AuditLogItem) => {
-    setAuditLogs((prev) => {
-      const updated = [item, ...prev].slice(0, 100);
-      try {
-        localStorage.setItem("jadai_audit_stream", JSON.stringify(updated));
-      } catch (e) {
-        console.error("Failed to save audit logs", e);
-      }
-      return updated;
+    // Log to local state immediately for fast feedback
+    setAuditLogs((prev) => [item, ...prev].slice(0, 100));
+
+    // Send to global Firebase Firestore collection
+    logTelemetryEvent({
+      fileName: item.fileName,
+      className: item.className,
+      fileSize: item.fileSize,
+      flagged: item.flagged,
+      reason: item.reason,
+      clientToken: item.ipPlaceholder || "10.84.x.x",
+      timestamp: item.timestamp
     });
   };
 
@@ -1497,12 +1514,13 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
                   <div>
                     <h3 className="text-sm font-bold text-white font-mono flex items-center gap-2">
                       JadAI Operational Oversight & Telemetry Stream
-                      <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded font-normal">
-                        LIVE FEED
+                      <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded font-normal flex items-center gap-1">
+                        <Database className="w-3 h-3" />
+                        GLOBAL FIRESTORE LIVE
                       </span>
                     </h3>
                     <p className="text-[10px] text-[#90909A] font-mono mt-0.5">
-                      Session file upload history and security threat analysis log
+                      Persistent real-time global telemetry log trace across all web visitors
                     </p>
                   </div>
                 </div>

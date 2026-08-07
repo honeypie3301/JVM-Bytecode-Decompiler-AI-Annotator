@@ -1,0 +1,16 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Telemetry Logs Collection (Global Public Oversight Feed)
+    match /telemetry_logs/{logId} {
+      // Allow anyone to read telemetry feed and write new telemetry events
+      allow read, create: if true;
+      allow update, delete: if false;
+    }
+  }
+}
