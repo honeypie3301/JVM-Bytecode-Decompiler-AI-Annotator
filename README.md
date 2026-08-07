@@ -11,4 +11,26 @@ A high-fidelity, client-side capable interactive JVM bytecode visualizer and AI-
 
 ## Deploying to GitHub Pages
 
-It takes centuries for github to deploy.
+This repository is pre-configured for automated deployment to GitHub Pages via GitHub Actions.
+
+### Setup Instructions
+
+1. **Enable GitHub Actions**:
+   - Go to your repository settings on GitHub: **Settings** > **Actions** > **General**.
+   - Under **Actions permissions**, select **Allow all actions and reusable workflows** and save.
+
+2. **Configure Pages Build Source**:
+   - Go to **Settings** > **Pages**.
+   - Under **Build and deployment** > **Source**, select **GitHub Actions**.
+
+3. **Trigger the Workflow**:
+   - Since GitHub does not retroactively trigger workflows for past commits after Actions are enabled, you can trigger it by:
+     - Making a new commit (e.g., pulling/pushing this updated `README.md` file).
+     - Or navigating to the **Actions** tab in your repository, selecting the **Deploy to GitHub Pages** workflow, and clicking **Run workflow**.
+
+### Running Client-Side
+
+Once deployed to GitHub Pages, the application runs entirely in your browser without a backend. To decompile files:
+1. Click the **Settings (Gear Icon)** in the top right corner.
+2. Enter your personal **Gemini API Key**.
+3. Your key is stored securely in your browser's local cache (`localStorage`) and sent directly to Google's official Gemini endpoint.
