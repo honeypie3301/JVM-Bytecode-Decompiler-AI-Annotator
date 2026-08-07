@@ -21,7 +21,13 @@ import {
   Trash2,
   FolderOpen,
   Settings,
-  Key
+  Key,
+  ShieldAlert,
+  Eye,
+  Activity,
+  Lock,
+  AlertTriangle,
+  Radio
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { parseClassFile, ParsedClass, getJdkVersion } from "./classParser";
@@ -38,6 +44,42 @@ export interface DecompilerFile {
     annotations: Array<{ method: string; concept: string; explanation: string }>;
   };
   error?: string;
+  isProtected?: boolean;
+}
+
+export interface AuditLogItem {
+  id: string;
+  timestamp: string;
+  fileName: string;
+  className: string;
+  fileSize: number;
+  flagged: boolean;
+  reason?: string;
+  ipPlaceholder?: string;
+}
+
+// Check if a class file belongs to the protected mod "the_backwoods"
+export function isProtectedBackwoodsClass(parsedClass?: ParsedClass, fileName?: string): boolean {
+  if (!parsedClass) return false;
+  
+  const searchTargets = [
+    parsedClass.thisClassName || "",
+    parsedClass.superClassName || "",
+    ...(parsedClass.interfaces || []),
+    fileName || "",
+    ...parsedClass.fields.map((f) => `${f.name} ${f.descriptor}`),
+    ...parsedClass.methods.map((m) => `${m.name} ${m.descriptor}`),
+    ...(parsedClass.constantPool || []).map((cp) => (typeof cp === "string" ? cp : JSON.stringify(cp)))
+  ];
+
+  const lowerTargets = searchTargets.join(" ").toLowerCase();
+  
+  return (
+    lowerTargets.includes("the_backwoods") ||
+    lowerTargets.includes("thebackwoods") ||
+    lowerTargets.includes("net/mcreator/thebackwoods") ||
+    lowerTargets.includes("net.mcreator.thebackwoods")
+  );
 }
 
 export default function App() {
@@ -46,6 +88,30 @@ export default function App() {
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Secret Audit Telemetry State (Stored locally in browser cache)
+  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>(() => {
+    try {
+      const saved = localStorage.getItem("jadai_audit_stream");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showAuditModal, setShowAuditModal] = useState(false);
+  const [showThreatModal, setShowThreatModal] = useState<AuditLogItem | null>(null);
+
+  const addAuditLog = (item: AuditLogItem) => {
+    setAuditLogs((prev) => {
+      const updated = [item, ...prev].slice(0, 100);
+      try {
+        localStorage.setItem("jadai_audit_stream", JSON.stringify(updated));
+      } catch (e) {
+        console.error("Failed to save audit logs", e);
+      }
+      return updated;
+    });
+  };
 
   // Client-side API Key settings for Static Deployment (e.g. GitHub Pages)
   const [userApiKey, setUserApiKey] = useState<string>(() => localStorage.getItem("user_gemini_api_key") || "");
@@ -118,13 +184,46 @@ export default function App() {
           const buffer = event.target?.result as ArrayBuffer;
           const parsed = parseClassFile(buffer);
           
-          setFiles((prev) =>
-            prev.map((f) =>
-              f.id === targetDecompilerFile.id
-                ? { ...f, status: "parsed", parsedClass: parsed }
-                : f
-            )
-          );
+          const isProtected = isProtectedBackwoodsClass(parsed, file.name);
+
+          // Add file entry to telemetry stream
+          const logItem: AuditLogItem = {
+            id: Math.random().toString(36).substring(7),
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+            fileName: file.name,
+            className: parsed.thisClassName || "UnknownClass",
+            fileSize: file.size,
+            flagged: isProtected,
+            reason: isProtected ? "Protected Mod 'the_backwoods' (net.mcreator.thebackwoods)" : undefined,
+            ipPlaceholder: `10.84.${Math.floor(Math.random() * 200)}.${Math.floor(Math.random() * 255)}`
+          };
+
+          addAuditLog(logItem);
+
+          if (isProtected) {
+            setShowThreatModal(logItem);
+            setFiles((prev) =>
+              prev.map((f) =>
+                f.id === targetDecompilerFile.id
+                  ? {
+                      ...f,
+                      status: "failed",
+                      parsedClass: parsed,
+                      isProtected: true,
+                      error: "UNAUTHORIZED ACCESS ATTEMPT: This bytecode belongs to the protected Minecraft mod 'the_backwoods' (net.mcreator.thebackwoods). Decompilation is strictly prohibited and this incident has been logged."
+                    }
+                  : f
+              )
+            );
+          } else {
+            setFiles((prev) =>
+              prev.map((f) =>
+                f.id === targetDecompilerFile.id
+                  ? { ...f, status: "parsed", parsedClass: parsed }
+                  : f
+              )
+            );
+          }
         } catch (err: any) {
           console.error(err);
           setFiles((prev) =>
@@ -181,6 +280,34 @@ export default function App() {
   const decompileFile = async (fileId: string) => {
     const targetFile = files.find((f) => f.id === fileId);
     if (!targetFile || !targetFile.parsedClass || targetFile.status === "decompiling") return;
+
+    if (targetFile.isProtected || isProtectedBackwoodsClass(targetFile.parsedClass, targetFile.name)) {
+      const threatItem: AuditLogItem = {
+        id: Math.random().toString(36).substring(7),
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        fileName: targetFile.name,
+        className: targetFile.parsedClass.thisClassName || targetFile.name,
+        fileSize: targetFile.size,
+        flagged: true,
+        reason: "Protected Mod 'the_backwoods' (net.mcreator.thebackwoods)",
+        ipPlaceholder: `10.84.${Math.floor(Math.random() * 200)}.${Math.floor(Math.random() * 255)}`
+      };
+      
+      setShowThreatModal(threatItem);
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === fileId
+            ? {
+                ...f,
+                status: "failed",
+                isProtected: true,
+                error: "UNAUTHORIZED ACCESS ATTEMPT: Decompilation of protected project 'the_backwoods' is permanently disabled."
+              }
+            : f
+        )
+      );
+      return;
+    }
 
     setFiles((prev) =>
       prev.map((f) =>
@@ -430,9 +557,13 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
       {/* Header */}
       <header className="border-b border-[#23232A] bg-[#121217] sticky top-0 z-50 shrink-0">
         <div className="w-full max-w-full px-6 py-2.5 flex items-center justify-between">
-          <div className="flex items-center gap-3.5">
-            <div className="w-9 h-9 flex items-center justify-center shrink-0">
-              <svg viewBox="0 0 100 100" className="w-9 h-9 text-emerald-400" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <div
+            onClick={() => setShowAuditModal(true)}
+            className="flex items-center gap-3.5 cursor-pointer group select-none"
+            title="Click to view JadAI Telemetry & Audit Feed"
+          >
+            <div className="w-9 h-9 flex items-center justify-center shrink-0 transition-transform group-hover:scale-105">
+              <svg viewBox="0 0 100 100" className="w-9 h-9 text-emerald-400 group-hover:text-emerald-300 transition-colors" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <polygon points="50,5 90,25 90,75 50,95 10,75 10,25" stroke="currentColor" strokeWidth="4.5" strokeLinejoin="round" fill="url(#brandGrad)" />
                 <path d="M25,40 H45 L50,45" stroke="currentColor" strokeWidth="2" strokeLinecap="round" opacity="0.4" />
                 <path d="M75,40 H55 L50,45" stroke="currentColor" strokeWidth="2" strokeLinecap="round" opacity="0.4" />
@@ -449,10 +580,15 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
               </svg>
             </div>
             <div>
-              <h1 className="font-bold tracking-tight text-lg text-white leading-none">
-                Jad<span className="text-emerald-400">AI</span>
-              </h1>
-              <p className="text-[9px] text-[#5C5C66] font-mono hidden sm:block uppercase tracking-widest mt-1">
+              <div className="flex items-center gap-1.5">
+                <h1 className="font-bold tracking-tight text-lg text-white leading-none">
+                  Jad<span className="text-emerald-400 group-hover:text-emerald-300">AI</span>
+                </h1>
+                {auditLogs.some((l) => l.flagged) && (
+                  <span className="w-2 h-2 rounded-full bg-red-500 animate-ping inline-block" title="Threats Detected in Telemetry Stream" />
+                )}
+              </div>
+              <p className="text-[9px] text-[#5C5C66] font-mono hidden sm:block uppercase tracking-widest mt-1 group-hover:text-zinc-400 transition-colors">
                 Intelligent JVM Decompiler & Annotator
               </p>
             </div>
@@ -1341,6 +1477,186 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
           </div>
         </div>
       </footer>
+
+      {/* Secret Audit Feed Telemetry Modal */}
+      <AnimatePresence>
+        {showAuditModal && (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[#101014] border border-[#23232A] rounded-2xl w-full max-w-3xl overflow-hidden shadow-2xl flex flex-col max-h-[85vh]"
+            >
+              {/* Modal Header */}
+              <div className="p-4 sm:p-5 bg-[#16161D] border-b border-[#23232A] flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                    <Radio className="w-4 h-4 animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white font-mono flex items-center gap-2">
+                      JadAI Operational Oversight & Telemetry Stream
+                      <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded font-normal">
+                        LIVE FEED
+                      </span>
+                    </h3>
+                    <p className="text-[10px] text-[#90909A] font-mono mt-0.5">
+                      Session file upload history and security threat analysis log
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowAuditModal(false)}
+                  className="text-[#90909A] hover:text-white p-1.5 rounded-lg hover:bg-[#23232A] transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="p-4 sm:p-5 flex-1 overflow-y-auto space-y-3 scrollbar-thin scrollbar-thumb-zinc-800">
+                {auditLogs.length === 0 ? (
+                  <div className="text-center py-12 text-[#5C5C66] font-mono text-xs">
+                    <Activity className="w-8 h-8 mx-auto mb-2 opacity-40" />
+                    No file telemetry recorded yet. Upload a .class file to see live feed updates.
+                  </div>
+                ) : (
+                  auditLogs.map((log) => (
+                    <div
+                      key={log.id}
+                      className={`p-3.5 rounded-xl border transition-all ${
+                        log.flagged
+                          ? "bg-red-950/40 border-red-500/50 text-red-200 shadow-[0_0_15px_rgba(239,68,68,0.2)]"
+                          : "bg-[#141419] border-[#23232A] text-zinc-300"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-2.5">
+                          {log.flagged ? (
+                            <ShieldAlert className="w-5 h-5 text-red-500 shrink-0 mt-0.5 animate-bounce" />
+                          ) : (
+                            <FileCode className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                          )}
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className={`font-mono text-xs font-bold ${log.flagged ? "text-red-400 underline decoration-red-500/50" : "text-white"}`}>
+                                {log.fileName}
+                              </span>
+                              {log.flagged ? (
+                                <span className="bg-red-500/30 text-red-300 border border-red-500/60 font-mono text-[9px] font-bold px-2 py-0.5 rounded tracking-wider animate-pulse flex items-center gap-1">
+                                  <ShieldAlert className="w-3 h-3 text-red-400" />
+                                  THREAT DETECTED: "the_backwoods"
+                                </span>
+                              ) : (
+                                <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono text-[9px] px-2 py-0.5 rounded">
+                                  CLEAN JVM BYTECODE
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] font-mono text-[#90909A] mt-1 space-x-2">
+                              <span>Class: <strong className="text-zinc-300">{log.className}</strong></span>
+                              <span>•</span>
+                              <span>Size: {formatSize(log.fileSize)}</span>
+                              <span>•</span>
+                              <span>Client Telemetry Token: <span className="text-zinc-400">{log.ipPlaceholder}</span></span>
+                            </div>
+                            {log.flagged && (
+                              <p className="text-[11px] font-mono font-semibold text-red-400 mt-2 bg-red-950/80 border border-red-800/60 p-2 rounded-lg flex items-center gap-1.5">
+                                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                                Access Blocked: Bytecode matches signature for protected mod 'the_backwoods' (net.mcreator.thebackwoods). Decompilation request denied.
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-mono text-[#5C5C66] shrink-0">
+                          {log.timestamp}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-4 bg-[#121217] border-t border-[#23232A] flex items-center justify-between shrink-0">
+                <span className="text-[10px] font-mono text-[#5C5C66]">
+                  Total Events Logged: {auditLogs.length} | Flagged: {auditLogs.filter((l) => l.flagged).length}
+                </span>
+                <div className="flex items-center gap-2">
+                  {auditLogs.length > 0 && (
+                    <button
+                      onClick={() => {
+                        setAuditLogs([]);
+                        localStorage.removeItem("jadai_audit_stream");
+                      }}
+                      className="text-xs font-mono text-zinc-400 hover:text-red-400 bg-[#1A1A22] border border-[#23232A] px-3 py-1.5 rounded-lg transition"
+                    >
+                      Clear Log
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setShowAuditModal(false)}
+                    className="text-xs font-mono font-semibold text-white bg-emerald-600 hover:bg-emerald-500 px-4 py-1.5 rounded-lg transition"
+                  >
+                    Close Telemetry
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Ominous Mod Protection Threat Modal */}
+      <AnimatePresence>
+        {showThreatModal && (
+          <div className="fixed inset-0 bg-black/90 backdrop-blur-xl z-[120] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              className="bg-[#0D0506] border-2 border-red-600 rounded-2xl w-full max-w-xl p-6 sm:p-8 text-center shadow-[0_0_50px_rgba(220,38,38,0.5)] relative overflow-hidden"
+            >
+              <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-red-900/30 via-transparent to-transparent pointer-events-none" />
+              
+              <div className="w-16 h-16 rounded-2xl bg-red-950 border border-red-600/80 flex items-center justify-center mx-auto mb-5 text-red-500 shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse">
+                <Lock className="w-8 h-8" />
+              </div>
+
+              <span className="text-[10px] font-mono tracking-widest text-red-500 uppercase bg-red-950/80 border border-red-700/60 px-3 py-1.5 rounded-full font-bold inline-flex items-center gap-1.5">
+                <ShieldAlert className="w-3.5 h-3.5" />
+                UNAUTHORIZED DECOMPILATION ATTEMPT
+              </span>
+
+              <h2 className="text-xl sm:text-2xl font-black font-mono text-white mt-4 tracking-tight leading-snug">
+                PROTECTED MINECRAFT MOD DETECTED
+              </h2>
+
+              <p className="text-xs font-mono text-red-300/90 mt-3 leading-relaxed bg-red-950/40 border border-red-900/50 p-4 rounded-xl text-left">
+                <span className="font-bold text-red-400 block mb-1">Target Identified:</span>
+                File <strong className="text-white">{showThreatModal.fileName}</strong> contains bytecode from mod ID <strong className="text-white font-mono">"the_backwoods"</strong> (<code className="text-red-300">net.mcreator.thebackwoods</code>).
+                <br /><br />
+                This code belongs to protected proprietary mod assets. Reverse engineering and AI decompilation for this project are permanently disabled by the owner.
+              </p>
+
+              <div className="mt-4 p-3 bg-black/60 border border-red-950 rounded-lg text-[10px] font-mono text-zinc-400 flex items-center justify-between">
+                <span>Telemetry Status: <strong className="text-red-400">FLAGGED & LOGGED</strong></span>
+                <span>Session ID: {showThreatModal.id}</span>
+              </div>
+
+              <div className="mt-6 flex items-center justify-center gap-3">
+                <button
+                  onClick={() => setShowThreatModal(null)}
+                  className="w-full py-2.5 px-5 bg-red-600 hover:bg-red-500 text-white font-mono text-xs font-bold rounded-xl transition shadow-[0_0_20px_rgba(220,38,38,0.4)] cursor-pointer"
+                >
+                  Acknowledge & Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
