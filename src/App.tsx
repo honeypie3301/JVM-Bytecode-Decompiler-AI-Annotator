@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { parseClassFile, ParsedClass, getJdkVersion } from "./classParser";
-import { subscribeToTelemetry, logTelemetryEvent, FirestoreTelemetryLog } from "./lib/firebase";
+import { subscribeToTelemetry, logTelemetryEvent, logVisitorSession, FirestoreTelemetryLog } from "./lib/firebase";
 import { SAMPLES, SampleClass, base64ToArrayBuffer } from "./samples";
 
 export interface DecompilerFile {
@@ -96,8 +96,11 @@ export default function App() {
   const [showAuditModal, setShowAuditModal] = useState(false);
   const [showThreatModal, setShowThreatModal] = useState<AuditLogItem | null>(null);
 
-  // Subscribe to real-time Firebase telemetry logs
+  // Subscribe to real-time Firebase telemetry logs and register visitor session
   useEffect(() => {
+    // Register visitor session connection event
+    logVisitorSession().catch(console.error);
+
     const unsubscribe = subscribeToTelemetry((firebaseLogs) => {
       const formatted: AuditLogItem[] = firebaseLogs.map((l) => ({
         id: l.id || Math.random().toString(36).substring(7),

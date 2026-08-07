@@ -49,13 +49,42 @@ const TELEMETRY_COLLECTION = "telemetry_logs";
  */
 export async function logTelemetryEvent(data: Omit<FirestoreTelemetryLog, "createdAt">) {
   try {
-    await addDoc(collection(db, TELEMETRY_COLLECTION), {
-      ...data,
+    const payload: Record<string, any> = {
+      fileName: data.fileName || "unknown.class",
+      className: data.className || "UnknownClass",
+      fileSize: typeof data.fileSize === "number" ? data.fileSize : 0,
+      flagged: Boolean(data.flagged),
+      clientToken: data.clientToken || "10.84.x.x",
+      timestamp: data.timestamp || new Date().toLocaleTimeString(),
       createdAt: Date.now()
-    });
+    };
+
+    if (data.reason) {
+      payload.reason = data.reason;
+    }
+
+    await addDoc(collection(db, TELEMETRY_COLLECTION), payload);
   } catch (error) {
     console.error("Failed to log global telemetry event to Firebase:", error);
   }
+}
+
+/**
+ * Log a new visitor session launch / page visit event
+ */
+export async function logVisitorSession() {
+  const randomOctet1 = Math.floor(Math.random() * 200) + 10;
+  const randomOctet2 = Math.floor(Math.random() * 255);
+  
+  await logTelemetryEvent({
+    fileName: "VISITOR_SESSION_INIT",
+    className: "GlobalWebVisitor",
+    fileSize: 0,
+    flagged: false,
+    reason: "New browser window / incognito session connected to live decompiler",
+    clientToken: `10.84.${randomOctet1}.${randomOctet2}`,
+    timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+  });
 }
 
 /**
