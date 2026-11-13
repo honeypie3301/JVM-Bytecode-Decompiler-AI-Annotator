@@ -1,28 +1,195 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
+
+const PRIMARY_GEMINI_MODEL = "gemini-4-hydrogen";
+const FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite";
+const DEFAULT_GPT_OSS_BASE_URL = "https://openrouter.ai/api/v1";
+const DEFAULT_GPT_OSS_MODEL = "openai/gpt-oss-120b";
+
+const DECOMPILE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    javaSource: {
+      type: Type.STRING,
+      description: "The complete, correct, and compilation-ready reconstructed high-level Java source code string",
+    },
+    classSummary: {
+      type: Type.STRING,
+      description: "A concise, developer-friendly summary of the class's purpose, design, and compiler details",
+    },
+    annotations: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          method: {
+            type: Type.STRING,
+            description: "Name of the method being annotated",
+          },
+          concept: {
+            type: Type.STRING,
+            description: "High-level concept, e.g. String Concatenation Optimization, or Exception Handling Flow",
+          },
+          explanation: {
+            type: Type.STRING,
+            description: "Detailed explanation of the JVM bytecode mechanics used for this concept",
+          },
+        },
+        required: ["method", "concept", "explanation"],
+      },
+      description: "List of annotations for various methods based on the bytecode disassembly",
+    },
+  },
+  required: ["javaSource", "classSummary", "annotations"],
+};
+
+const DECOMPILE_SYSTEM_INSTRUCTION =
+  "You are a world-class, high-speed Java decompiler. Respond strictly with a valid JSON object conforming to the requested schema. Ensure the reconstructed Java code is flawless, beautiful, and syntactically valid. Keep explanations extremely concise and direct to maximize decompilation speed.";
+
+function parseJsonResponse(rawText: string) {
+  const trimmed = rawText.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const cleaned = trimmed.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
+    return JSON.parse(cleaned);
+  }
+}
+
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callGptOssFallback(
+  systemInstruction: string,
+  userPrompt: string,
+  expectJson: boolean
+): Promise<string> {
+  const gptOssKey = process.env.GPT_OSS_API_KEY;
+  if (!gptOssKey) {
+    throw new Error("GPT_OSS_API_KEY not configured");
+  }
+
+  const baseUrl = (process.env.GPT_OSS_BASE_URL || DEFAULT_GPT_OSS_BASE_URL).replace(/\/+$/, "");
+  const model = process.env.GPT_OSS_MODEL || DEFAULT_GPT_OSS_MODEL;
+
+  const body: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: "system", content: systemInstruction },
+      { role: "user", content: userPrompt },
+    ],
+  };
+
+  if (expectJson) {
+    body.response_format = { type: "json_object" };
+  }
+
+  const resp = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${gptOssKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`GPT-OSS fallback error (${resp.status}): ${errText}`);
+  }
+
+  const data = (await resp.json()) as any;
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("Empty response from GPT-OSS fallback");
+  }
+  return content;
+}
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Set up JSON body parser with increased limit for larger class files
   app.use(express.json({ limit: "50mb" }));
 
-  // Initialize the server-side Gemini client
   const apiKey = process.env.GEMINI_API_KEY;
-  const ai = new GoogleGenAI({
-    apiKey: apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
-      },
-    },
-  });
+  const ai = apiKey
+    ? new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      })
+    : null;
+
+  async function runDecompileWithFallback(prompt: string) {
+    let lastError: unknown;
+
+    if (ai) {
+      // Attempt 1 & 2: Primary Gemini 4 Hydrogen with short backoff retry
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model: PRIMARY_GEMINI_MODEL,
+            contents: prompt,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              responseMimeType: "application/json",
+              responseSchema: DECOMPILE_SCHEMA,
+              systemInstruction: DECOMPILE_SYSTEM_INSTRUCTION,
+            },
+          });
+          if (response.text) {
+            return parseJsonResponse(response.text);
+          }
+          throw new Error("Empty response from primary Gemini model");
+        } catch (err) {
+          lastError = err;
+          if (attempt === 0) {
+            await sleep(750);
+          }
+        }
+      }
+
+      // Attempt 3: Automatic Gemini Flash-Lite fallback (same API key, separate capacity pool)
+      try {
+        console.warn("Primary model busy; falling back to", FALLBACK_GEMINI_MODEL);
+        const fallbackResponse = await ai.models.generateContent({
+          model: FALLBACK_GEMINI_MODEL,
+          contents: prompt,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+            responseMimeType: "application/json",
+            responseSchema: DECOMPILE_SCHEMA,
+            systemInstruction: DECOMPILE_SYSTEM_INSTRUCTION,
+          },
+        });
+        if (fallbackResponse.text) {
+          return parseJsonResponse(fallbackResponse.text);
+        }
+        throw new Error("Empty response from fallback Gemini model");
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    // Attempt 4: Optional GPT-OSS 120B OpenAI-compatible fallback
+    if (process.env.GPT_OSS_API_KEY) {
+      console.warn("Gemini unavailable; falling back to GPT-OSS 120B");
+      const raw = await callGptOssFallback(DECOMPILE_SYSTEM_INSTRUCTION, prompt, true);
+      return parseJsonResponse(raw);
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("Decompilation failed");
+  }
 
   // API Route for AI Decompilation and Source Reconstruction
   app.post("/api/decompile", async (req, res) => {
@@ -32,8 +199,7 @@ async function startServer() {
         return res.status(400).json({ error: "Missing class data" });
       }
 
-      // Check if API key is configured
-      if (!apiKey) {
+      if (!apiKey && !process.env.GPT_OSS_API_KEY) {
         return res.status(500).json({
           error: "GEMINI_API_KEY environment variable is not configured. Please configure it in Settings > Secrets.",
         });
@@ -95,66 +261,7 @@ Core Requirements:
 Ensure the output is strictly valid JSON in the response, matching the JSON schema. Do not enclose the JSON inside a markdown block like \`\`\`json.
 `;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.6-flash",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              javaSource: {
-                type: Type.STRING,
-                description: "The complete, correct, and compilation-ready reconstructed high-level Java source code string",
-              },
-              classSummary: {
-                type: Type.STRING,
-                description: "A concise, developer-friendly summary of the class's purpose, design, and compiler details",
-              },
-              annotations: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    method: {
-                      type: Type.STRING,
-                      description: "Name of the method being annotated",
-                    },
-                    concept: {
-                      type: Type.STRING,
-                      description: "High-level concept, e.g. String Concatenation Optimization, or Exception Handling Flow",
-                    },
-                    explanation: {
-                      type: Type.STRING,
-                      description: "Detailed explanation of the JVM bytecode mechanics used for this concept",
-                    },
-                  },
-                  required: ["method", "concept", "explanation"],
-                },
-                description: "List of annotations for various methods based on the bytecode disassembly",
-              },
-            },
-            required: ["javaSource", "classSummary", "annotations"],
-          },
-          systemInstruction: "You are a world-class, high-speed Java decompiler. Respond strictly with a valid JSON object conforming to the requested schema. Ensure the reconstructed Java code is flawless, beautiful, and syntactically valid. Keep explanations extremely concise and direct to maximize decompilation speed.",
-        },
-      });
-
-      const responseText = response.text;
-      if (!responseText) {
-        throw new Error("Empty response from Gemini");
-      }
-
-      let parsedResult;
-      try {
-        parsedResult = JSON.parse(responseText.trim());
-      } catch (parseError) {
-        console.error("Failed to parse Gemini JSON output. Raw output was:", responseText);
-        // Fallback in case response had markdown block or formatting issues
-        const cleanJsonStr = responseText.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
-        parsedResult = JSON.parse(cleanJsonStr);
-      }
-
+      const parsedResult = await runDecompileWithFallback(prompt);
       res.json(parsedResult);
     } catch (error: any) {
       console.error("Decompilation error:", error);
@@ -165,18 +272,17 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
   // API Route for Interactive AI Chat
   app.post("/api/chat", async (req, res) => {
     try {
-      const { message, javaSource, classSummary, history } = req.body;
+      const { message, javaSource, classSummary } = req.body;
       if (!message) {
         return res.status(400).json({ error: "Missing message" });
       }
 
-      if (!apiKey) {
+      if (!apiKey && !process.env.GPT_OSS_API_KEY) {
         return res.status(500).json({
           error: "GEMINI_API_KEY environment variable is not configured. Please configure it in Settings > Secrets.",
         });
       }
 
-      // Build chat context
       const chatContext = `
 You are the interactive AI assistant embedded inside the JVM Bytecode Decompiler & AI Annotator.
 The user is inspecting the following Java class:
@@ -192,16 +298,38 @@ ${javaSource || "// Code not available yet"}
 Answer the user's questions about this class, explain specific bytecode structures, convert code to Kotlin, optimize the logic, or help them understand JVM mechanisms. Keep explanations elegant, clear, and focused on systems/modding concepts where applicable (like Minecraft Forge, Fabric, or MCreator procedures).
 `;
 
-      const chat = ai.chats.create({
-        model: "gemini-3.6-flash",
-        config: {
-          systemInstruction: chatContext,
-        },
-      });
+      if (ai) {
+        try {
+          const chat = ai.chats.create({
+            model: PRIMARY_GEMINI_MODEL,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              systemInstruction: chatContext,
+            },
+          });
+          const response = await chat.sendMessage({ message });
+          return res.json({ text: response.text });
+        } catch {
+          try {
+            const fallbackChat = ai.chats.create({
+              model: FALLBACK_GEMINI_MODEL,
+              config: {
+                thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+                systemInstruction: chatContext,
+              },
+            });
+            const fallbackResponse = await fallbackChat.sendMessage({ message });
+            return res.json({ text: fallbackResponse.text });
+          } catch (fallbackErr) {
+            if (!process.env.GPT_OSS_API_KEY) {
+              throw fallbackErr;
+            }
+          }
+        }
+      }
 
-      // Send chat message
-      const response = await chat.sendMessage({ message });
-      res.json({ text: response.text });
+      const text = await callGptOssFallback(chatContext, message, false);
+      res.json({ text });
     } catch (error: any) {
       console.error("Chat error:", error);
       res.status(500).json({ error: error.message || "Chat failed" });
