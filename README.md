@@ -9,3 +9,4 @@ A high-fidelity, client-side capable interactive JVM bytecode visualizer and AI-
 - **Rich Bytecode Annotations**: Highlight complex JVM instructions (such as `invokevirtual` optimization patterns or synthetic compiler bridges) with detailed, educational compiler notes.
 - **Serverless & Static Deployable**: Designed to run seamlessly either through a full-stack Express server or completely client-side in static environments (like **GitHub Pages**) by configuring your personal Gemini API key.
 
+
