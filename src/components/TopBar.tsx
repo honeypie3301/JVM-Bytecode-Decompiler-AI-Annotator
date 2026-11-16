@@ -15,7 +15,7 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   return (
     <header className="h-14 border-b border-[#2A2623] bg-[#141210]/95 backdrop-blur-sm sticky top-0 z-40 shrink-0">
-      <div className="h-full max-w-[1600px] mx-auto px-6 flex items-center justify-between gap-8">
+      <div className="h-full max-w-[1600px] mx-auto px-4 sm:px-6 flex items-center justify-between gap-4 sm:gap-8">
         <button
           type="button"
           onClick={onOpenSecretAudit}

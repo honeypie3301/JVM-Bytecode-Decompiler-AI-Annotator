@@ -14,6 +14,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { DecompilerFile, WorkspaceTab } from "../types";
+import { WARM_OBSIDIAN_THEME } from "../theme";
 
 interface WorkspaceViewProps {
   files: DecompilerFile[];
@@ -22,6 +23,10 @@ interface WorkspaceViewProps {
   selectedMethodIdx: number;
   isDragging: boolean;
   copied: boolean;
+  includeAnnotations: boolean;
+  annotatingFileId: string | null;
+  onToggleAnnotations: (val: boolean) => void;
+  onGenerateAnnotations: (fileId: string) => void;
   onSelectFile: (fileId: string) => void;
   onRemoveFile: (fileId: string, e: React.MouseEvent) => void;
   onClearAll: () => void;
@@ -75,6 +80,37 @@ const OPCODE_REFERENCE = [
   },
 ];
 
+function formatErrorDisplay(rawError?: string): { summary: string; details?: string } {
+  const fallback = "Unable to reconstruct Java source for this class file.";
+  if (!rawError) return { summary: fallback };
+
+  const trimmed = rawError.trim();
+  try {
+    const parsed = JSON.parse(trimmed);
+    const apiErr = parsed?.error || parsed;
+    if (apiErr?.message) {
+      const firstLine = String(apiErr.message).split("\n")[0].trim();
+      const codePrefix = apiErr.code ? `Error ${apiErr.code}: ` : "";
+      return {
+        summary: `${codePrefix}${firstLine}`,
+        details: JSON.stringify(parsed, null, 2),
+      };
+    }
+  } catch {
+    // Not raw JSON
+  }
+
+  if (trimmed.length > 240) {
+    const firstSentence = trimmed.split(/(?<=[.!?])\s+/)[0] || trimmed.slice(0, 220) + "…";
+    return {
+      summary: firstSentence,
+      details: trimmed,
+    };
+  }
+
+  return { summary: trimmed };
+}
+
 function getStatusDisplay(file: DecompilerFile): { label: string; colorClass: string } {
   if (file.isProtected) {
     return { label: "Blocked", colorClass: "text-[#C76E6E]" };
@@ -102,6 +138,10 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   selectedMethodIdx,
   isDragging,
   copied,
+  includeAnnotations,
+  annotatingFileId,
+  onToggleAnnotations,
+  onGenerateAnnotations,
   onSelectFile,
   onRemoveFile,
   onClearAll,
@@ -118,6 +158,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 }) => {
   const [cpSearch, setCpSearch] = useState("");
   const [isMethodMenuOpen, setIsMethodMenuOpen] = useState(false);
+  const [isMobileRailOpen, setIsMobileRailOpen] = useState(false);
   const [summaryWidthPct, setSummaryWidthPct] = useState(41.67);
   const [isResizingSummary, setIsResizingSummary] = useState(false);
 
@@ -209,10 +250,51 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
   const selectedMethod = parsedClass?.methods[selectedMethodIdx] || null;
 
+  const activeStatus = activeFile ? getStatusDisplay(activeFile) : null;
+  const isAnnotating = Boolean(activeFile && annotatingFileId === activeFile.id);
+  const hasSummaryOrNotes = Boolean(
+    decompiledResult &&
+      (decompiledResult.classSummary?.trim() || (decompiledResult.annotations && decompiledResult.annotations.length > 0))
+  );
+
   return (
     <div className="flex-1 max-w-[1600px] w-full mx-auto flex flex-col lg:flex-row min-h-0 overflow-hidden">
+      {/* MOBILE COMPACT RAIL BAR */}
+      <div className="lg:hidden px-4 py-2 border-b border-[#2A2623] bg-[#141210] flex items-center justify-between gap-3 shrink-0">
+        <div className="min-w-0 flex items-center gap-2 text-xs">
+          <span className="font-mono text-[#EAE5DE] truncate">
+            {activeFile?.name || "No class selected"}
+          </span>
+          {activeStatus && (
+            <>
+              <span className="text-[#4A443E]" aria-hidden="true">
+                ·
+              </span>
+              <span className={`${activeStatus.colorClass} shrink-0`}>{activeStatus.label}</span>
+            </>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => setIsMobileRailOpen((prev) => !prev)}
+          aria-expanded={isMobileRailOpen}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#1C1917] hover:bg-[#24211E] border border-[#2E2A26] text-[11px] font-medium text-[#C4BCB3] shrink-0 cursor-pointer"
+        >
+          <span>Queue &amp; Outline ({files.length})</span>
+          <ChevronDown
+            className={`w-3.5 h-3.5 text-[#A69E94] transition-transform duration-150 ${
+              isMobileRailOpen ? "rotate-180 text-[#C5A880]" : ""
+            }`}
+          />
+        </button>
+      </div>
+
       {/* LEFT RAIL: Class Queue & Class Outline */}
-      <aside className="w-full lg:w-76 shrink-0 border-b lg:border-b-0 lg:border-r border-[#2A2623] bg-[#141210] flex flex-col min-h-0 max-h-[340px] lg:max-h-none">
+      <aside
+        className={`${
+          isMobileRailOpen ? "flex max-h-[48vh]" : "hidden"
+        } lg:flex w-full lg:w-76 shrink-0 border-b lg:border-b-0 lg:border-r border-[#2A2623] bg-[#141210] flex-col min-h-0 lg:max-h-none`}
+      >
         {/* Queue Header */}
         <div className="px-4 py-3 border-b border-[#2A2623] flex items-center justify-between shrink-0">
           <span className="text-xs font-medium text-[#EAE5DE] tabular-nums">
@@ -255,7 +337,10 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             return (
               <div
                 key={file.id}
-                onClick={() => onSelectFile(file.id)}
+                onClick={() => {
+                  onSelectFile(file.id);
+                  setIsMobileRailOpen(false);
+                }}
                 className={`px-2.5 py-2.5 rounded-lg cursor-pointer transition-colors flex items-center justify-between gap-2 ${
                   isSelected ? "bg-[#1F1C1A]" : "hover:bg-[#191715]"
                 }`}
@@ -383,7 +468,10 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                         <button
                           key={idx}
                           type="button"
-                          onClick={() => onSelectMethod(idx, true)}
+                          onClick={() => {
+                            onSelectMethod(idx, true);
+                            setIsMobileRailOpen(false);
+                          }}
                           className={`w-full px-2.5 py-2 rounded-md text-left transition-colors cursor-pointer ${
                             isMethodSelected
                               ? "bg-[#221F1C] border border-[#38332E]"
@@ -423,10 +511,10 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
       {/* MAIN VIEWPORT */}
       <section className="flex-1 min-w-0 flex flex-col bg-[#11100F] min-h-0 overflow-hidden">
         {/* Context Header */}
-        <div className="px-6 py-4 border-b border-[#2A2623] flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
+        <div className="px-4 sm:px-6 py-3 sm:py-4 border-b border-[#2A2623] flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 shrink-0">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-xs font-mono text-[#706961] truncate">
-              {packagePath && <span>{packagePath}</span>}
+            <div className="flex items-center flex-wrap gap-x-2 gap-y-0.5 text-xs font-mono text-[#706961]">
+              {packagePath && <span className="break-all sm:truncate">{packagePath}</span>}
               {packagePath && <span aria-hidden="true">/</span>}
               <span className="text-[#EAE5DE] font-medium">{simpleClassName}</span>
             </div>
@@ -444,16 +532,42 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             )}
           </div>
 
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex items-center flex-wrap gap-2 sm:gap-2.5 shrink-0">
             {activeFile && !activeFile.isProtected && (activeFile.status === "parsed" || activeFile.status === "failed") && (
-              <button
-                type="button"
-                onClick={() => onDecompileFile(activeFile.id)}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#C5A880] hover:bg-[#D2B894] text-[#11100F] text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Play className="w-3.5 h-3.5" />
-                <span>Reconstruct Source</span>
-              </button>
+              <>
+                <label
+                  data-theme={WARM_OBSIDIAN_THEME.bgCanvas}
+                  className="group inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-[#181614] hover:bg-[#1F1C1A] border border-[#2A2623] hover:border-[#35302B] text-xs font-medium text-[#C4BCB3] cursor-pointer select-none whitespace-nowrap transition-colors"
+                >
+                  <input
+                    type="checkbox"
+                    checked={includeAnnotations}
+                    onChange={(e) => onToggleAnnotations(e.target.checked)}
+                    className="peer sr-only"
+                  />
+                  <span
+                    aria-hidden="true"
+                    className={`w-4 h-4 rounded flex items-center justify-center border transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-[#C5A880]/60 ${
+                      includeAnnotations
+                        ? "bg-[#C5A880] border-[#C5A880] text-[#11100F]"
+                        : "bg-[#12100E] border-[#35302B] group-hover:border-[#C5A880]/70 text-transparent"
+                    }`}
+                  >
+                    <Check className="w-3 h-3 stroke-[2.75]" />
+                  </span>
+                  <span className={includeAnnotations ? "text-[#EAE5DE]" : "text-[#C4BCB3]"}>
+                    AI Summary &amp; Notes
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => onDecompileFile(activeFile.id)}
+                  className="inline-flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-lg bg-[#C5A880] hover:bg-[#D2B894] text-[#11100F] text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>Reconstruct Source</span>
+                </button>
+              </>
             )}
 
             {decompiledResult && (
@@ -461,7 +575,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                 <button
                   type="button"
                   onClick={onCopyCode}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#181614] hover:bg-[#221F1C] border border-[#2A2623] text-xs font-medium text-[#EAE5DE] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 sm:px-3.5 py-2 rounded-lg bg-[#181614] hover:bg-[#221F1C] border border-[#2A2623] text-xs font-medium text-[#EAE5DE] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   {copied ? (
                     <>
@@ -478,7 +592,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                 <button
                   type="button"
                   onClick={onDownloadJava}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#181614] hover:bg-[#221F1C] border border-[#2A2623] text-xs font-medium text-[#EAE5DE] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 sm:px-3.5 py-2 rounded-lg bg-[#181614] hover:bg-[#221F1C] border border-[#2A2623] text-xs font-medium text-[#EAE5DE] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5 text-[#A69E94]" />
                   <span>Download .java</span>
@@ -489,33 +603,33 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         </div>
 
         {/* View Switcher Tabs */}
-        <div className="px-6 border-b border-[#2A2623] bg-[#141210] flex items-center gap-6 shrink-0 overflow-x-auto">
+        <div className="px-4 sm:px-6 border-b border-[#2A2623] bg-[#141210] flex items-center gap-4 sm:gap-6 shrink-0 overflow-x-auto">
           <button
             type="button"
             onClick={() => onSelectTab("java")}
-            className={`py-3 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`py-2.5 sm:py-3 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === "java"
                 ? "border-[#C5A880] text-[#EAE5DE]"
                 : "border-transparent text-[#A69E94] hover:text-[#EAE5DE]"
             }`}
           >
-            Reconstructed Source
+            <span className="hidden sm:inline">Reconstructed </span>Source
           </button>
           <button
             type="button"
             onClick={() => onSelectTab("bytecode")}
-            className={`py-3 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`py-2.5 sm:py-3 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === "bytecode"
                 ? "border-[#C5A880] text-[#EAE5DE]"
                 : "border-transparent text-[#A69E94] hover:text-[#EAE5DE]"
             }`}
           >
-            Bytecode Disassembly
+            Bytecode<span className="hidden sm:inline"> Disassembly</span>
           </button>
           <button
             type="button"
             onClick={() => onSelectTab("structure")}
-            className={`py-3 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`py-2.5 sm:py-3 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === "structure"
                 ? "border-[#C5A880] text-[#EAE5DE]"
                 : "border-transparent text-[#A69E94] hover:text-[#EAE5DE]"
@@ -531,14 +645,21 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
           {activeTab === "java" && (
             <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
               {activeFile?.status === "decompiling" ? (
-                <div className="flex-1 flex flex-col items-center justify-center p-12 text-center">
-                  <Loader2 className="w-7 h-7 text-[#C5A880] animate-spin mb-4" />
-                  <h3 className="font-display text-lg font-normal text-[#EAE5DE]">
-                    Reconstructing Java source
-                  </h3>
-                  <p className="mt-1.5 text-sm text-[#A69E94] max-w-md">
-                    Analyzing control flow, resolving local variable types, and preparing compiler notes.
-                  </p>
+                <div className="flex-1 min-h-0 overflow-y-auto p-6 sm:p-10 flex">
+                  <div className="m-auto w-full max-w-md flex flex-col items-center text-center">
+                    <Loader2 className="w-7 h-7 text-[#C5A880] animate-spin mb-4" />
+                    <h3 className="font-display text-lg font-normal text-[#EAE5DE]">
+                      Reconstructing Java source
+                    </h3>
+                    <p className="mt-1.5 text-sm text-[#A69E94]">
+                      Analyzing control flow, resolving local variable types, and preparing compiler notes.
+                    </p>
+                    {activeFile.decompileProgress && (
+                      <p className="mt-3 font-mono text-xs text-[#C5A880] tabular-nums">
+                        {activeFile.decompileProgress}
+                      </p>
+                    )}
+                  </div>
                 </div>
               ) : decompiledResult ? (
                 <div
@@ -603,100 +724,151 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                   {/* Class Summary & AI Annotations Pane */}
                   <div
                     style={{ ["--summary-width" as string]: `${summaryWidthPct}%` }}
-                    className="w-full xl:w-[var(--summary-width)] xl:shrink-0 bg-[#11100F] flex flex-col min-h-[260px] xl:min-h-0 overflow-y-auto"
+                    className={`w-full xl:w-[var(--summary-width)] xl:shrink-0 bg-[#11100F] flex flex-col overflow-y-auto ${
+                      hasSummaryOrNotes ? "min-h-[220px] xl:min-h-0" : "shrink-0 xl:min-h-0"
+                    }`}
                   >
-                    <div className="p-6 border-b border-[#24211E]">
-                      <h3 className="text-xs font-medium text-[#C5A880] mb-2">Class Summary</h3>
-                      <p className="text-sm text-[#C4BCB3] leading-relaxed">
-                        {decompiledResult.classSummary}
-                      </p>
-                    </div>
-
-                    <div className="p-6 flex-1">
-                      <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-xs font-medium text-[#EAE5DE]">Bytecode Annotations</h3>
-                        <span className="text-xs text-[#706961] tabular-nums">
-                          {decompiledResult.annotations.length} notes
-                        </span>
-                      </div>
-
-                      {decompiledResult.annotations.length > 0 ? (
-                        <div className="divide-y divide-[#24211E]">
-                          {decompiledResult.annotations.map((annot, idx) => {
-                            const lower = annot.concept.toLowerCase();
-                            const conceptTone =
-                              lower.includes("sec") || lower.includes("warn")
-                                ? "text-[#C76E6E]"
-                                : lower.includes("opt") || lower.includes("perf")
-                                  ? "text-[#7EA287]"
-                                  : "text-[#C5A880]";
-
-                            return (
-                              <div key={idx} className="py-4 first:pt-0 last:pb-0">
-                                <div className="flex items-baseline justify-between gap-3">
-                                  <span className="font-mono text-xs font-medium text-[#EAE5DE]">
-                                    {annot.method}()
-                                  </span>
-                                  <span className={`text-xs font-medium text-right ${conceptTone}`}>
-                                    {annot.concept}
-                                  </span>
-                                </div>
-                                <p className="mt-1.5 text-[13px] text-[#A69E94] leading-relaxed">
-                                  {annot.explanation}
-                                </p>
-                              </div>
-                            );
-                          })}
+                    {!hasSummaryOrNotes ? (
+                      <div className="p-4 sm:p-6 flex flex-col sm:flex-row xl:flex-col sm:items-center xl:items-start justify-between gap-3">
+                        <div>
+                          <h3 className="text-xs font-medium text-[#C5A880]">AI Summary &amp; Notes</h3>
+                          <p className="mt-1 text-xs text-[#A69E94] leading-relaxed">
+                            Skipped for faster decompilation. Generate an AI architectural summary and bytecode notes anytime.
+                          </p>
                         </div>
-                      ) : (
-                        <p className="text-xs text-[#706961]">No method annotations returned.</p>
-                      )}
-                    </div>
+                        {activeFile && (
+                          <button
+                            type="button"
+                            disabled={isAnnotating}
+                            onClick={() => onGenerateAnnotations(activeFile.id)}
+                            className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-lg bg-[#221F1C] hover:bg-[#2B2723] disabled:opacity-60 border border-[#35302B] text-xs font-medium text-[#EAE5DE] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            {isAnnotating ? (
+                              <>
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C5A880]" />
+                                <span>Generating...</span>
+                              </>
+                            ) : (
+                              <span>Generate Summary &amp; Notes</span>
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <>
+                        <div className="p-5 sm:p-6 border-b border-[#24211E]">
+                          <h3 className="text-xs font-medium text-[#C5A880] mb-2">Class Summary</h3>
+                          <p className="text-sm text-[#C4BCB3] leading-relaxed">
+                            {decompiledResult.classSummary}
+                          </p>
+                        </div>
+
+                        <div className="p-5 sm:p-6 flex-1">
+                          <div className="flex items-center justify-between mb-4">
+                            <h3 className="text-xs font-medium text-[#EAE5DE]">Bytecode Annotations</h3>
+                            <span className="text-xs text-[#706961] tabular-nums">
+                              {decompiledResult.annotations.length} notes
+                            </span>
+                          </div>
+
+                          {decompiledResult.annotations.length > 0 ? (
+                            <div className="divide-y divide-[#24211E]">
+                              {decompiledResult.annotations.map((annot, idx) => {
+                                const lower = annot.concept.toLowerCase();
+                                const conceptTone =
+                                  lower.includes("sec") || lower.includes("warn")
+                                    ? "text-[#C76E6E]"
+                                    : lower.includes("opt") || lower.includes("perf")
+                                      ? "text-[#7EA287]"
+                                      : "text-[#C5A880]";
+
+                                return (
+                                  <div key={idx} className="py-4 first:pt-0 last:pb-0">
+                                    <div className="flex items-baseline justify-between gap-3">
+                                      <span className="font-mono text-xs font-medium text-[#EAE5DE]">
+                                        {annot.method}()
+                                      </span>
+                                      <span className={`text-xs font-medium text-right ${conceptTone}`}>
+                                        {annot.concept}
+                                      </span>
+                                    </div>
+                                    <p className="mt-1.5 text-[13px] text-[#A69E94] leading-relaxed">
+                                      {annot.explanation}
+                                    </p>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-[#706961]">No method annotations returned.</p>
+                          )}
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               ) : activeFile?.status === "failed" ? (
-                <div className="flex-1 flex flex-col items-center justify-center p-10 text-center">
-                  <div className="w-11 h-11 rounded-lg bg-[#261818] border border-[#5A3232] flex items-center justify-center text-[#C76E6E] mb-4">
-                    {activeFile.isProtected ? <Lock className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-                  </div>
-                  <h3 className="font-display text-lg font-normal text-[#EAE5DE]">
-                    {activeFile.isProtected ? "Protected Class Blocked" : "Reconstruction Failed"}
-                  </h3>
-                  <p className="mt-2 text-sm text-[#A69E94] max-w-md leading-relaxed">
-                    {activeFile.error || "Unable to reconstruct Java source for this class file."}
-                  </p>
-                  {!activeFile.isProtected && (
-                    <button
-                      type="button"
-                      onClick={() => onDecompileFile(activeFile.id)}
-                      className="mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#221F1C] hover:bg-[#2B2723] border border-[#35302B] text-xs font-medium text-[#EAE5DE] transition-colors cursor-pointer"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Retry Reconstruction</span>
-                    </button>
-                  )}
-                </div>
+                (() => {
+                  const formattedError = formatErrorDisplay(activeFile.error);
+                  return (
+                    <div className="flex-1 min-h-0 overflow-y-auto p-6 sm:p-10 flex">
+                      <div className="m-auto w-full max-w-xl flex flex-col items-center text-center">
+                        <div className="w-11 h-11 rounded-lg bg-[#261818] border border-[#5A3232] flex items-center justify-center text-[#C76E6E] mb-4 shrink-0">
+                          {activeFile.isProtected ? <Lock className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+                        </div>
+                        <h3 className="font-display text-lg font-normal text-[#EAE5DE]">
+                          {activeFile.isProtected ? "Protected Class Blocked" : "Reconstruction Failed"}
+                        </h3>
+                        <p className="mt-2 text-sm text-[#A69E94] leading-relaxed break-words max-w-lg">
+                          {formattedError.summary}
+                        </p>
+                        {formattedError.details && (
+                          <details className="mt-3 w-full max-w-lg text-left">
+                            <summary className="text-xs text-[#706961] hover:text-[#EAE5DE] cursor-pointer select-none text-center">
+                              Show technical details
+                            </summary>
+                            <pre className="mt-2 max-h-44 overflow-auto rounded-lg bg-[#141210] border border-[#2A2623] p-3 font-mono text-[11px] leading-relaxed text-[#A69E94] whitespace-pre-wrap break-all">
+                              {formattedError.details}
+                            </pre>
+                          </details>
+                        )}
+                        {!activeFile.isProtected && (
+                          <button
+                            type="button"
+                            onClick={() => onDecompileFile(activeFile.id)}
+                            className="mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#221F1C] hover:bg-[#2B2723] border border-[#35302B] text-xs font-medium text-[#EAE5DE] transition-colors cursor-pointer shrink-0"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>Retry Reconstruction</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()
               ) : (
-                <div className="flex-1 flex flex-col items-center justify-center p-10 text-center">
-                  <div className="w-11 h-11 rounded-lg bg-[#181614] border border-[#2A2623] flex items-center justify-center text-[#C5A880] mb-4">
-                    <FileCode2 className="w-5 h-5" />
+                <div className="flex-1 min-h-0 overflow-y-auto p-6 sm:p-10 flex">
+                  <div className="m-auto w-full max-w-md flex flex-col items-center text-center">
+                    <div className="w-11 h-11 rounded-lg bg-[#181614] border border-[#2A2623] flex items-center justify-center text-[#C5A880] mb-4 shrink-0">
+                      <FileCode2 className="w-5 h-5" />
+                    </div>
+                    <h3 className="font-display text-lg font-normal text-[#EAE5DE]">
+                      Ready to reconstruct source
+                    </h3>
+                    <p className="mt-2 text-sm text-[#A69E94] leading-relaxed">
+                      Binary metadata and disassembled opcodes are loaded. Run source reconstruction to generate annotated Java code.
+                    </p>
+                    {activeFile && (
+                      <button
+                        type="button"
+                        onClick={() => onDecompileFile(activeFile.id)}
+                        className="mt-5 inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-[#C5A880] hover:bg-[#D2B894] text-[#11100F] text-xs font-semibold transition-colors cursor-pointer shrink-0"
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                        <span>Reconstruct Source</span>
+                      </button>
+                    )}
                   </div>
-                  <h3 className="font-display text-lg font-normal text-[#EAE5DE]">
-                    Ready to reconstruct source
-                  </h3>
-                  <p className="mt-2 text-sm text-[#A69E94] max-w-md leading-relaxed">
-                    Binary metadata and disassembled opcodes are loaded. Run source reconstruction to generate annotated Java code.
-                  </p>
-                  {activeFile && (
-                    <button
-                      type="button"
-                      onClick={() => onDecompileFile(activeFile.id)}
-                      className="mt-5 inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-[#C5A880] hover:bg-[#D2B894] text-[#11100F] text-xs font-semibold transition-colors cursor-pointer"
-                    >
-                      <Play className="w-3.5 h-3.5" />
-                      <span>Reconstruct Source</span>
-                    </button>
-                  )}
                 </div>
               )}
             </div>

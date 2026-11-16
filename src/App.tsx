@@ -44,6 +44,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("java");
   const [selectedMethodIdx, setSelectedMethodIdx] = useState<number>(0);
   const [copied, setCopied] = useState(false);
+  const [includeAnnotations, setIncludeAnnotations] = useState(false);
+  const [annotatingFileId, setAnnotatingFileId] = useState<string | null>(null);
 
   // Modals
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
@@ -303,63 +305,293 @@ export default function App() {
     }
 
     setFiles((prev) =>
-      prev.map((f) => (f.id === fileId ? { ...f, status: "decompiling", error: undefined } : f))
+      prev.map((f) =>
+        f.id === fileId
+          ? { ...f, status: "decompiling", decompileProgress: undefined, error: undefined }
+          : f
+      )
     );
 
+    const updateProgress = (progressText?: string) => {
+      setFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, decompileProgress: progressText } : f))
+      );
+    };
+
+    const postDecompile = async (payload: Record<string, unknown>) => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const res = await fetch("/api/decompile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          return res.json();
+        }
+
+        const errData = await res.json().catch(() => ({}));
+        const msg = String(errData.error || "Server failed to decompile the class file.");
+        const lowerMsg = msg.toLowerCase();
+        const isTransient =
+          lowerMsg.includes("429") ||
+          lowerMsg.includes("503") ||
+          lowerMsg.includes("quota") ||
+          lowerMsg.includes("high demand") ||
+          lowerMsg.includes("unavailable") ||
+          lowerMsg.includes("overloaded") ||
+          lowerMsg.includes("resource_exhausted");
+
+        if (isTransient && attempt < 2) {
+          const match = msg.match(/retry in\s+([\d.]+)s/i);
+          const defaultWait = attempt === 0 ? 2500 : 5000;
+          const waitMs = match
+            ? Math.min(15000, Math.max(2000, Math.ceil(parseFloat(match[1]) * 1000) + 400))
+            : defaultWait;
+          updateProgress(
+            `Model busy — retrying in ${Math.ceil(waitMs / 1000)}s (attempt ${attempt + 2}/3)`
+          );
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        throw new Error(msg);
+      }
+    };
+
     try {
-      const compactClassData = {
+      const compactFields = targetFile.parsedClass.fields.map((f) => ({
+        name: f.name,
+        descriptor: f.descriptor,
+        accessFlagsNames: f.accessFlagsNames,
+      }));
+
+      const compactMethods = targetFile.parsedClass.methods.map((m) => ({
+        name: m.name,
+        descriptor: m.descriptor,
+        accessFlagsNames: m.accessFlagsNames,
+        code: m.code
+          ? {
+              maxStack: m.code.maxStack,
+              maxLocals: m.code.maxLocals,
+              ...(m.code.exceptionTable.length > 0 ? { exceptionTable: m.code.exceptionTable } : {}),
+              instructions: m.code.instructions.map((inst) => ({
+                offset: inst.offset,
+                mnemonic: inst.mnemonic,
+                ...(inst.details ? { details: inst.details } : {}),
+              })),
+            }
+          : undefined,
+      }));
+
+      const baseClassData = {
         thisClassName: targetFile.parsedClass.thisClassName,
         superClassName: targetFile.parsedClass.superClassName,
         interfaces: targetFile.parsedClass.interfaces,
         jdkVersion: targetFile.parsedClass.jdkVersion,
         majorVersion: targetFile.parsedClass.majorVersion,
         accessFlagsNames: targetFile.parsedClass.accessFlagsNames,
-        fields: targetFile.parsedClass.fields.map((f) => ({
-          name: f.name,
-          descriptor: f.descriptor,
-          accessFlagsNames: f.accessFlagsNames,
-        })),
-        methods: targetFile.parsedClass.methods.map((m) => ({
-          name: m.name,
-          descriptor: m.descriptor,
-          accessFlagsNames: m.accessFlagsNames,
-          code: m.code
-            ? {
-                maxStack: m.code.maxStack,
-                maxLocals: m.code.maxLocals,
-                ...(m.code.exceptionTable.length > 0 ? { exceptionTable: m.code.exceptionTable } : {}),
-                instructions: m.code.instructions.map((inst) => ({
-                  offset: inst.offset,
-                  mnemonic: inst.mnemonic,
-                  ...(inst.details ? { details: inst.details } : {}),
-                })),
-              }
-            : undefined,
-        })),
+        fields: compactFields,
       };
 
-      const res = await fetch("/api/decompile", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ classData: compactClassData }),
-      });
+      const totalInstructions = compactMethods.reduce(
+        (sum, m) => sum + (m.code?.instructions.length || 0),
+        0
+      );
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Server failed to decompile the class file.");
+      const singleMethodLimit = includeAnnotations ? 35 : 50;
+      const singleInsnLimit = includeAnnotations ? 1200 : 1800;
+
+      // Small/medium classes: single fast pass
+      if (compactMethods.length <= singleMethodLimit && totalInstructions <= singleInsnLimit) {
+        const data = await postDecompile({
+          classData: { ...baseClassData, methods: compactMethods },
+          includeAnnotations,
+        });
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === fileId
+              ? {
+                  ...f,
+                  status: "decompiled",
+                  decompileProgress: undefined,
+                  decompiledResult: {
+                    javaSource: data.javaSource || "",
+                    classSummary: data.classSummary || "",
+                    annotations: Array.isArray(data.annotations) ? data.annotations : [],
+                    includeAnnotations,
+                  },
+                }
+              : f
+          )
+        );
+        return;
       }
 
-      const data = await res.json();
+      // Large classes: partition methods into balanced batches and run concurrently
+      const maxBatchMethods = includeAnnotations ? 25 : 45;
+      const maxBatchInsns = includeAnnotations ? 900 : 1600;
+      const batches: typeof compactMethods[] = [];
+      let currentBatch: typeof compactMethods = [];
+      let currentInsns = 0;
+
+      for (const method of compactMethods) {
+        const methodInsns = method.code?.instructions.length || 0;
+        if (
+          currentBatch.length > 0 &&
+          (currentBatch.length >= maxBatchMethods || currentInsns + methodInsns > maxBatchInsns)
+        ) {
+          batches.push(currentBatch);
+          currentBatch = [];
+          currentInsns = 0;
+        }
+        currentBatch.push(method);
+        currentInsns += methodInsns;
+      }
+      if (currentBatch.length > 0) {
+        batches.push(currentBatch);
+      }
+
+      const batchResults = new Array<any>(batches.length);
+      let nextIndex = 0;
+      let completedBatches = 0;
+      let completedMethods = 0;
+      const concurrency = Math.min(2, batches.length);
+
+      updateProgress(
+        `Decompiling ${batches.length} batches (0/${compactMethods.length} methods)`
+      );
+
+      const worker = async () => {
+        while (true) {
+          const i = nextIndex++;
+          if (i >= batches.length) return;
+          const batch = batches[i];
+
+          const chunkResult = await postDecompile({
+            classData: { ...baseClassData, methods: batch },
+            chunk: { index: i, total: batches.length },
+            includeAnnotations,
+          });
+
+          batchResults[i] = chunkResult;
+          completedBatches += 1;
+          completedMethods += batch.length;
+          updateProgress(
+            `Batch ${completedBatches}/${batches.length} · ${completedMethods}/${compactMethods.length} methods`
+          );
+        }
+      };
+
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+      let combinedJavaSource = "";
+      let classSummary = "";
+      const combinedAnnotations: Array<{ method: string; concept: string; explanation: string }> = [];
+
+      for (let i = 0; i < batchResults.length; i++) {
+        const chunkResult = batchResults[i];
+        if (!chunkResult) continue;
+
+        if (i === 0) {
+          combinedJavaSource = chunkResult.javaSource || "";
+          classSummary = chunkResult.classSummary || "";
+        } else if (chunkResult.methodsCode) {
+          const cleanedExtra = String(chunkResult.methodsCode).trim();
+          if (cleanedExtra) {
+            const lastBraceIdx = combinedJavaSource.lastIndexOf("}");
+            const indentedExtra = cleanedExtra
+              .split("\n")
+              .map((line) => (line.trim() === "" ? "" : /^\s/.test(line) ? line : `    ${line}`))
+              .join("\n");
+            combinedJavaSource =
+              lastBraceIdx === -1
+                ? `${combinedJavaSource}\n\n${indentedExtra}`
+                : `${combinedJavaSource.slice(0, lastBraceIdx).trimEnd()}\n\n${indentedExtra}\n}\n`;
+          }
+        }
+
+        if (Array.isArray(chunkResult.annotations)) {
+          combinedAnnotations.push(...chunkResult.annotations);
+        }
+      }
 
       setFiles((prev) =>
-        prev.map((f) => (f.id === fileId ? { ...f, status: "decompiled", decompiledResult: data } : f))
+        prev.map((f) =>
+          f.id === fileId
+            ? {
+                ...f,
+                status: "decompiled",
+                decompileProgress: undefined,
+                decompiledResult: {
+                  javaSource: combinedJavaSource,
+                  classSummary,
+                  annotations: combinedAnnotations,
+                  includeAnnotations,
+                },
+              }
+            : f
+        )
       );
     } catch (err: any) {
       setFiles((prev) =>
         prev.map((f) =>
-          f.id === fileId ? { ...f, status: "failed", error: err.message || "Decompilation failed." } : f
+          f.id === fileId
+            ? {
+                ...f,
+                status: "failed",
+                decompileProgress: undefined,
+                error: err.message || "Decompilation failed.",
+              }
+            : f
         )
       );
+    }
+  };
+
+  const generateAnnotationsForFile = async (fileId: string) => {
+    const targetFile = files.find((f) => f.id === fileId);
+    if (!targetFile || !targetFile.decompiledResult?.javaSource || annotatingFileId) return;
+
+    setAnnotatingFileId(fileId);
+    try {
+      const res = await fetch("/api/decompile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "annotate",
+          classData: {
+            thisClassName: targetFile.parsedClass?.thisClassName,
+            jdkVersion: targetFile.parsedClass?.jdkVersion,
+          },
+          javaSource: targetFile.decompiledResult.javaSource,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Failed to generate AI summary and annotations.");
+      }
+
+      const data = await res.json();
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === fileId && f.decompiledResult
+            ? {
+                ...f,
+                decompiledResult: {
+                  ...f.decompiledResult,
+                  classSummary: data.classSummary || "",
+                  annotations: Array.isArray(data.annotations) ? data.annotations : [],
+                  includeAnnotations: true,
+                },
+              }
+            : f
+        )
+      );
+    } catch (err: any) {
+      setError(err.message || "Failed to generate AI summary and annotations.");
+    } finally {
+      setAnnotatingFileId(null);
     }
   };
 
@@ -420,7 +652,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen h-screen bg-[#11100F] text-[#EAE5DE] flex flex-col font-sans overflow-hidden">
+    <div className="min-h-[100dvh] h-[100dvh] bg-[#11100F] text-[#EAE5DE] flex flex-col font-sans overflow-hidden">
       <input
         type="file"
         ref={fileInputRef}
@@ -437,7 +669,7 @@ export default function App() {
 
       {/* Global Notification Banner */}
       {error && (
-        <div className="bg-[#241717] border-b border-[#4D2D2D] px-6 py-2.5 flex items-center justify-between gap-4 shrink-0">
+        <div className="bg-[#241717] border-b border-[#4D2D2D] px-4 sm:px-6 py-2.5 flex items-center justify-between gap-4 shrink-0">
           <div className="flex items-center gap-2.5 text-xs text-[#E6A3A3]">
             <AlertCircle className="w-4 h-4 text-[#C76E6E] shrink-0" />
             <span>{error}</span>
@@ -454,16 +686,18 @@ export default function App() {
       )}
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col min-h-0 overflow-y-auto lg:overflow-hidden">
+      <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
         {files.length === 0 ? (
-          <LandingView
-            isDragging={isDragging}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onTriggerUpload={() => fileInputRef.current?.click()}
-            onLoadSample={loadSampleClass}
-          />
+          <div className="flex-1 overflow-y-auto flex flex-col">
+            <LandingView
+              isDragging={isDragging}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onTriggerUpload={() => fileInputRef.current?.click()}
+              onLoadSample={loadSampleClass}
+            />
+          </div>
         ) : (
           <WorkspaceView
             files={files}
@@ -472,6 +706,10 @@ export default function App() {
             selectedMethodIdx={selectedMethodIdx}
             isDragging={isDragging}
             copied={copied}
+            includeAnnotations={includeAnnotations}
+            annotatingFileId={annotatingFileId}
+            onToggleAnnotations={setIncludeAnnotations}
+            onGenerateAnnotations={generateAnnotationsForFile}
             onSelectFile={setSelectedFileId}
             onRemoveFile={handleRemoveFile}
             onClearAll={handleClearAll}
@@ -495,7 +733,7 @@ export default function App() {
       </main>
 
       {/* Quiet Footer */}
-      <footer className="border-t border-[#2A2623] bg-[#141210] px-6 py-2.5 shrink-0">
+      <footer className="border-t border-[#2A2623] bg-[#141210] px-4 sm:px-6 py-2.5 shrink-0">
         <div className="max-w-[1600px] mx-auto flex items-center justify-end text-[11px] text-[#706961]">
           <button
             type="button"

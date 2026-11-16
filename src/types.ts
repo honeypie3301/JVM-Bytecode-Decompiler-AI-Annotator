@@ -8,6 +8,7 @@ export interface DecompiledResult {
     concept: string;
     explanation: string;
   }>;
+  includeAnnotations?: boolean;
 }
 
 export interface DecompilerFile {
@@ -17,6 +18,7 @@ export interface DecompilerFile {
   status: "idle" | "parsing" | "parsed" | "decompiling" | "decompiled" | "failed";
   parsedClass?: ParsedClass;
   decompiledResult?: DecompiledResult;
+  decompileProgress?: string;
   error?: string;
   isProtected?: boolean;
 }

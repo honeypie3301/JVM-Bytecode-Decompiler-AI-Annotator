@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/*
+ * THEME RULE (Warm Obsidian & Brass):
+ * Always keep every UI control custom-styled in dark obsidian (#11100F / #141210 / #181614),
+ * hairline borders (#2A2623 / #35302B), and muted brass (#C5A880).
+ * Never expose unstyled OS-native white controls (checkboxes, selects, scrollbars).
+ */
 @theme {
   --font-display: "Fraunces", Georgia, serif;
   --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
