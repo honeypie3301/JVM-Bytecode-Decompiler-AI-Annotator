@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { AlertCircle, X } from "lucide-react";
-import { parseClassFile, ParsedClass } from "./classParser";
+import { parseClassFile } from "./classParser";
+import { inspectAndSealArtifact } from "./lib/bytecodeEnvelope";
 import { subscribeToTelemetry, logTelemetryEvent, logVisitorSession } from "./lib/firebase";
 import { SampleClass, base64ToArrayBuffer } from "./samples";
 import { DecompilerFile, AuditLogItem, WorkspaceTab } from "./types";
@@ -11,28 +12,15 @@ import { AuditModal } from "./components/AuditModal";
 import { ThreatModal } from "./components/ThreatModal";
 import { SamplesModal } from "./components/SamplesModal";
 
-// Check if a class file belongs to the protected mod "the_backwoods"
-export function isProtectedBackwoodsClass(parsedClass?: ParsedClass, fileName?: string): boolean {
-  if (!parsedClass) return false;
-
-  const searchTargets = [
-    parsedClass.thisClassName || "",
-    parsedClass.superClassName || "",
-    ...(parsedClass.interfaces || []),
-    fileName || "",
-    ...parsedClass.fields.map((f) => `${f.name} ${f.descriptor}`),
-    ...parsedClass.methods.map((m) => `${m.name} ${m.descriptor}`),
-    ...(parsedClass.constantPool || []).map((cp) => (typeof cp === "string" ? cp : JSON.stringify(cp))),
-  ];
-
-  const lowerTargets = searchTargets.join(" ").toLowerCase();
-
-  return (
-    lowerTargets.includes("the_backwoods") ||
-    lowerTargets.includes("thebackwoods") ||
-    lowerTargets.includes("net/mcreator/thebackwoods") ||
-    lowerTargets.includes("net.mcreator.thebackwoods")
-  );
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    parts.push(String.fromCharCode(...slice));
+  }
+  return btoa(parts.join(""));
 }
 
 export default function App() {
@@ -46,6 +34,7 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [includeAnnotations, setIncludeAnnotations] = useState(false);
   const [annotatingFileId, setAnnotatingFileId] = useState<string | null>(null);
+  const [classMapping, setClassMapping] = useState<{ name: string; text: string } | null>(null);
 
   // Modals
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
@@ -54,6 +43,8 @@ export default function App() {
   const [showThreatModal, setShowThreatModal] = useState<AuditLogItem | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mappingInputRef = useRef<HTMLInputElement>(null);
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
 
   // Subscribe to real-time Firebase telemetry logs and register visitor session
   useEffect(() => {
@@ -73,7 +64,11 @@ export default function App() {
       setAuditLogs(formatted);
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      abortControllersRef.current.forEach((ctrl) => ctrl.abort());
+      abortControllersRef.current.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -98,7 +93,8 @@ export default function App() {
     try {
       const buffer = base64ToArrayBuffer(sample.base64);
       const parsed = parseClassFile(buffer);
-      const isProtected = isProtectedBackwoodsClass(parsed, sample.name);
+      const envelope = inspectAndSealArtifact(buffer, parsed, sample.name);
+      const isRestricted = !envelope.allowed;
       const fileId = Math.random().toString(36).substring(7);
 
       const logItem: AuditLogItem = {
@@ -111,14 +107,14 @@ export default function App() {
         fileName: sample.name,
         className: parsed.thisClassName || "UnknownClass",
         fileSize: buffer.byteLength,
-        flagged: isProtected,
-        reason: isProtected ? "Protected Mod 'the_backwoods' (net.mcreator.thebackwoods)" : undefined,
+        flagged: isRestricted,
+        reason: isRestricted ? `Restricted bytecode signature [${envelope.code || "SIG-0x9C4E"}]` : undefined,
         ipPlaceholder: `10.84.${Math.floor(Math.random() * 200)}.${Math.floor(Math.random() * 255)}`,
       };
 
       addAuditLog(logItem);
 
-      if (isProtected) {
+      if (isRestricted) {
         setShowThreatModal(logItem);
       }
 
@@ -126,11 +122,13 @@ export default function App() {
         id: fileId,
         name: sample.name,
         size: buffer.byteLength,
-        status: isProtected ? "failed" : "parsed",
+        status: isRestricted ? "failed" : "parsed",
         parsedClass: parsed,
-        isProtected,
-        error: isProtected
-          ? "Protected class artifact detected (net.mcreator.thebackwoods). Source reconstruction is disabled."
+        rawBase64: isRestricted ? undefined : sample.base64,
+        envelopeSeal: isRestricted ? undefined : envelope.seal,
+        isProtected: isRestricted,
+        error: isRestricted
+          ? "Restricted bytecode signature detected. Source reconstruction is disabled."
           : undefined,
       };
 
@@ -177,7 +175,8 @@ export default function App() {
         try {
           const buffer = event.target?.result as ArrayBuffer;
           const parsed = parseClassFile(buffer);
-          const isProtected = isProtectedBackwoodsClass(parsed, file.name);
+          const envelope = inspectAndSealArtifact(buffer, parsed, file.name);
+          const isRestricted = !envelope.allowed;
 
           const logItem: AuditLogItem = {
             id: Math.random().toString(36).substring(7),
@@ -189,14 +188,14 @@ export default function App() {
             fileName: file.name,
             className: parsed.thisClassName || "UnknownClass",
             fileSize: file.size,
-            flagged: isProtected,
-            reason: isProtected ? "Protected Mod 'the_backwoods' (net.mcreator.thebackwoods)" : undefined,
+            flagged: isRestricted,
+            reason: isRestricted ? `Restricted bytecode signature [${envelope.code || "SIG-0x9C4E"}]` : undefined,
             ipPlaceholder: `10.84.${Math.floor(Math.random() * 200)}.${Math.floor(Math.random() * 255)}`,
           };
 
           addAuditLog(logItem);
 
-          if (isProtected) {
+          if (isRestricted) {
             setShowThreatModal(logItem);
             setFiles((prev) =>
               prev.map((f) =>
@@ -205,17 +204,28 @@ export default function App() {
                       ...f,
                       status: "failed",
                       parsedClass: parsed,
+                      rawBase64: undefined,
+                      envelopeSeal: undefined,
                       isProtected: true,
                       error:
-                        "Protected class artifact detected (net.mcreator.thebackwoods). Source reconstruction is disabled and this attempt has been logged.",
+                        "Restricted bytecode signature detected. Source reconstruction is disabled and this attempt has been logged.",
                     }
                   : f
               )
             );
           } else {
+            const rawBase64 = arrayBufferToBase64(buffer);
             setFiles((prev) =>
               prev.map((f) =>
-                f.id === targetDecompilerFile.id ? { ...f, status: "parsed", parsedClass: parsed } : f
+                f.id === targetDecompilerFile.id
+                  ? {
+                      ...f,
+                      status: "parsed",
+                      parsedClass: parsed,
+                      rawBase64,
+                      envelopeSeal: envelope.seal,
+                    }
+                  : f
               )
             );
           }
@@ -268,11 +278,32 @@ export default function App() {
     }
   };
 
+  const cancelDecompile = (fileId: string) => {
+    const controller = abortControllersRef.current.get(fileId);
+    if (controller) {
+      controller.abort();
+      abortControllersRef.current.delete(fileId);
+    }
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.id === fileId && f.status === "decompiling"
+          ? {
+              ...f,
+              status: "parsed",
+              decompileProgress: undefined,
+              error: undefined,
+            }
+          : f
+      )
+    );
+  };
+
   const decompileFile = async (fileId: string) => {
     const targetFile = files.find((f) => f.id === fileId);
     if (!targetFile || !targetFile.parsedClass || targetFile.status === "decompiling") return;
 
-    if (targetFile.isProtected || isProtectedBackwoodsClass(targetFile.parsedClass, targetFile.name)) {
+    const envelope = inspectAndSealArtifact(undefined, targetFile.parsedClass, targetFile.name);
+    if (targetFile.isProtected || !envelope.allowed || !targetFile.envelopeSeal || !targetFile.rawBase64) {
       const threatItem: AuditLogItem = {
         id: Math.random().toString(36).substring(7),
         timestamp: new Date().toLocaleTimeString([], {
@@ -284,7 +315,7 @@ export default function App() {
         className: targetFile.parsedClass.thisClassName || targetFile.name,
         fileSize: targetFile.size,
         flagged: true,
-        reason: "Protected Mod 'the_backwoods' (net.mcreator.thebackwoods)",
+        reason: `Restricted bytecode signature [${envelope.code || "SIG-0x9C4E"}]`,
         ipPlaceholder: `10.84.${Math.floor(Math.random() * 200)}.${Math.floor(Math.random() * 255)}`,
       };
 
@@ -295,8 +326,10 @@ export default function App() {
             ? {
                 ...f,
                 status: "failed",
+                rawBase64: undefined,
+                envelopeSeal: undefined,
                 isProtected: true,
-                error: "Protected class artifact detected (net.mcreator.thebackwoods). Source reconstruction is disabled.",
+                error: "Restricted bytecode signature detected. Source reconstruction is disabled.",
               }
             : f
         )
@@ -304,217 +337,83 @@ export default function App() {
       return;
     }
 
+    abortControllersRef.current.get(fileId)?.abort();
+    const controller = new AbortController();
+    abortControllersRef.current.set(fileId, controller);
+
     setFiles((prev) =>
       prev.map((f) =>
         f.id === fileId
-          ? { ...f, status: "decompiling", decompileProgress: undefined, error: undefined }
+          ? {
+              ...f,
+              status: "decompiling",
+              decompileProgress: includeAnnotations
+                ? "Decompiling with CFR 0.152 & preparing notes..."
+                : "Running CFR 0.152 decompiler...",
+              error: undefined,
+            }
           : f
       )
     );
 
-    const updateProgress = (progressText?: string) => {
-      setFiles((prev) =>
-        prev.map((f) => (f.id === fileId ? { ...f, decompileProgress: progressText } : f))
-      );
-    };
-
-    const postDecompile = async (payload: Record<string, unknown>) => {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const res = await fetch("/api/decompile", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-
-        if (res.ok) {
-          return res.json();
-        }
-
-        const errData = await res.json().catch(() => ({}));
-        const msg = String(errData.error || "Server failed to decompile the class file.");
-        const lowerMsg = msg.toLowerCase();
-        const isTransient =
-          lowerMsg.includes("429") ||
-          lowerMsg.includes("503") ||
-          lowerMsg.includes("quota") ||
-          lowerMsg.includes("high demand") ||
-          lowerMsg.includes("unavailable") ||
-          lowerMsg.includes("overloaded") ||
-          lowerMsg.includes("resource_exhausted");
-
-        if (isTransient && attempt < 2) {
-          const match = msg.match(/retry in\s+([\d.]+)s/i);
-          const defaultWait = attempt === 0 ? 2500 : 5000;
-          const waitMs = match
-            ? Math.min(15000, Math.max(2000, Math.ceil(parseFloat(match[1]) * 1000) + 400))
-            : defaultWait;
-          updateProgress(
-            `Model busy — retrying in ${Math.ceil(waitMs / 1000)}s (attempt ${attempt + 2}/3)`
-          );
-          await new Promise((r) => setTimeout(r, waitMs));
-          continue;
-        }
-        throw new Error(msg);
-      }
-    };
-
     try {
-      const compactFields = targetFile.parsedClass.fields.map((f) => ({
-        name: f.name,
-        descriptor: f.descriptor,
-        accessFlagsNames: f.accessFlagsNames,
-      }));
-
-      const compactMethods = targetFile.parsedClass.methods.map((m) => ({
-        name: m.name,
-        descriptor: m.descriptor,
-        accessFlagsNames: m.accessFlagsNames,
-        code: m.code
-          ? {
-              maxStack: m.code.maxStack,
-              maxLocals: m.code.maxLocals,
-              ...(m.code.exceptionTable.length > 0 ? { exceptionTable: m.code.exceptionTable } : {}),
-              instructions: m.code.instructions.map((inst) => ({
-                offset: inst.offset,
-                mnemonic: inst.mnemonic,
-                ...(inst.details ? { details: inst.details } : {}),
-              })),
-            }
-          : undefined,
-      }));
-
-      const baseClassData = {
-        thisClassName: targetFile.parsedClass.thisClassName,
-        superClassName: targetFile.parsedClass.superClassName,
-        interfaces: targetFile.parsedClass.interfaces,
-        jdkVersion: targetFile.parsedClass.jdkVersion,
-        majorVersion: targetFile.parsedClass.majorVersion,
-        accessFlagsNames: targetFile.parsedClass.accessFlagsNames,
-        fields: compactFields,
-      };
-
-      const totalInstructions = compactMethods.reduce(
-        (sum, m) => sum + (m.code?.instructions.length || 0),
-        0
-      );
-
-      const singleMethodLimit = includeAnnotations ? 35 : 50;
-      const singleInsnLimit = includeAnnotations ? 1200 : 1800;
-
-      // Small/medium classes: single fast pass
-      if (compactMethods.length <= singleMethodLimit && totalInstructions <= singleInsnLimit) {
-        const data = await postDecompile({
-          classData: { ...baseClassData, methods: compactMethods },
+      const res = await fetch("/api/decompile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          classBytesBase64: targetFile.rawBase64,
+          fileName: targetFile.name,
+          mappingText: classMapping?.text,
+          envelopeSeal: targetFile.envelopeSeal,
           includeAnnotations,
-        });
-        setFiles((prev) =>
-          prev.map((f) =>
-            f.id === fileId
-              ? {
-                  ...f,
-                  status: "decompiled",
-                  decompileProgress: undefined,
-                  decompiledResult: {
-                    javaSource: data.javaSource || "",
-                    classSummary: data.classSummary || "",
-                    annotations: Array.isArray(data.annotations) ? data.annotations : [],
-                    includeAnnotations,
-                  },
-                }
-              : f
-          )
-        );
-        return;
-      }
+          classData: {
+            thisClassName: targetFile.parsedClass.thisClassName,
+            jdkVersion: targetFile.parsedClass.jdkVersion,
+          },
+        }),
+      });
 
-      // Large classes: partition methods into balanced batches and run concurrently
-      const maxBatchMethods = includeAnnotations ? 25 : 45;
-      const maxBatchInsns = includeAnnotations ? 900 : 1600;
-      const batches: typeof compactMethods[] = [];
-      let currentBatch: typeof compactMethods = [];
-      let currentInsns = 0;
-
-      for (const method of compactMethods) {
-        const methodInsns = method.code?.instructions.length || 0;
-        if (
-          currentBatch.length > 0 &&
-          (currentBatch.length >= maxBatchMethods || currentInsns + methodInsns > maxBatchInsns)
-        ) {
-          batches.push(currentBatch);
-          currentBatch = [];
-          currentInsns = 0;
-        }
-        currentBatch.push(method);
-        currentInsns += methodInsns;
-      }
-      if (currentBatch.length > 0) {
-        batches.push(currentBatch);
-      }
-
-      const batchResults = new Array<any>(batches.length);
-      let nextIndex = 0;
-      let completedBatches = 0;
-      let completedMethods = 0;
-      const concurrency = Math.min(2, batches.length);
-
-      updateProgress(
-        `Decompiling ${batches.length} batches (0/${compactMethods.length} methods)`
-      );
-
-      const worker = async () => {
-        while (true) {
-          const i = nextIndex++;
-          if (i >= batches.length) return;
-          const batch = batches[i];
-
-          const chunkResult = await postDecompile({
-            classData: { ...baseClassData, methods: batch },
-            chunk: { index: i, total: batches.length },
-            includeAnnotations,
-          });
-
-          batchResults[i] = chunkResult;
-          completedBatches += 1;
-          completedMethods += batch.length;
-          updateProgress(
-            `Batch ${completedBatches}/${batches.length} · ${completedMethods}/${compactMethods.length} methods`
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        if (res.status === 403 || errData.restricted) {
+          const threatItem: AuditLogItem = {
+            id: Math.random().toString(36).substring(7),
+            timestamp: new Date().toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            }),
+            fileName: targetFile.name,
+            className: targetFile.parsedClass.thisClassName || targetFile.name,
+            fileSize: targetFile.size,
+            flagged: true,
+            reason: "Restricted bytecode signature [SIG-0x9C4E]",
+            ipPlaceholder: `10.84.${Math.floor(Math.random() * 200)}.${Math.floor(Math.random() * 255)}`,
+          };
+          addAuditLog(threatItem);
+          setShowThreatModal(threatItem);
+          setFiles((prev) =>
+            prev.map((f) =>
+              f.id === fileId
+                ? {
+                    ...f,
+                    status: "failed",
+                    rawBase64: undefined,
+                    envelopeSeal: undefined,
+                    isProtected: true,
+                    decompileProgress: undefined,
+                    error: errData.error || "Restricted bytecode signature detected.",
+                  }
+                : f
+            )
           );
+          return;
         }
-      };
-
-      await Promise.all(Array.from({ length: concurrency }, () => worker()));
-
-      let combinedJavaSource = "";
-      let classSummary = "";
-      const combinedAnnotations: Array<{ method: string; concept: string; explanation: string }> = [];
-
-      for (let i = 0; i < batchResults.length; i++) {
-        const chunkResult = batchResults[i];
-        if (!chunkResult) continue;
-
-        if (i === 0) {
-          combinedJavaSource = chunkResult.javaSource || "";
-          classSummary = chunkResult.classSummary || "";
-        } else if (chunkResult.methodsCode) {
-          const cleanedExtra = String(chunkResult.methodsCode).trim();
-          if (cleanedExtra) {
-            const lastBraceIdx = combinedJavaSource.lastIndexOf("}");
-            const indentedExtra = cleanedExtra
-              .split("\n")
-              .map((line) => (line.trim() === "" ? "" : /^\s/.test(line) ? line : `    ${line}`))
-              .join("\n");
-            combinedJavaSource =
-              lastBraceIdx === -1
-                ? `${combinedJavaSource}\n\n${indentedExtra}`
-                : `${combinedJavaSource.slice(0, lastBraceIdx).trimEnd()}\n\n${indentedExtra}\n}\n`;
-          }
-        }
-
-        if (Array.isArray(chunkResult.annotations)) {
-          combinedAnnotations.push(...chunkResult.annotations);
-        }
+        throw new Error(errData.error || "CFR decompilation failed.");
       }
 
+      const data = await res.json();
       setFiles((prev) =>
         prev.map((f) =>
           f.id === fileId
@@ -522,10 +421,12 @@ export default function App() {
                 ...f,
                 status: "decompiled",
                 decompileProgress: undefined,
+                mappingName: classMapping?.name,
                 decompiledResult: {
-                  javaSource: combinedJavaSource,
-                  classSummary,
-                  annotations: combinedAnnotations,
+                  javaSource: data.javaSource || "",
+                  classSummary: data.classSummary || "",
+                  summaryModel: data.summaryModel,
+                  annotations: Array.isArray(data.annotations) ? data.annotations : [],
                   includeAnnotations,
                 },
               }
@@ -533,6 +434,22 @@ export default function App() {
         )
       );
     } catch (err: any) {
+      if (err?.name === "AbortError" || controller.signal.aborted) {
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === fileId && f.status === "decompiling"
+              ? {
+                  ...f,
+                  status: "parsed",
+                  decompileProgress: undefined,
+                  error: undefined,
+                }
+              : f
+          )
+        );
+        return;
+      }
+
       setFiles((prev) =>
         prev.map((f) =>
           f.id === fileId
@@ -545,6 +462,10 @@ export default function App() {
             : f
         )
       );
+    } finally {
+      if (abortControllersRef.current.get(fileId) === controller) {
+        abortControllersRef.current.delete(fileId);
+      }
     }
   };
 
@@ -581,6 +502,7 @@ export default function App() {
                 decompiledResult: {
                   ...f.decompiledResult,
                   classSummary: data.classSummary || "",
+                  summaryModel: data.summaryModel,
                   annotations: Array.isArray(data.annotations) ? data.annotations : [],
                   includeAnnotations: true,
                 },
@@ -603,6 +525,8 @@ export default function App() {
 
   const handleRemoveFile = (fileId: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    abortControllersRef.current.get(fileId)?.abort();
+    abortControllersRef.current.delete(fileId);
     setFiles((prev) => {
       const filtered = prev.filter((f) => f.id !== fileId);
       if (selectedFileId === fileId) {
@@ -613,6 +537,8 @@ export default function App() {
   };
 
   const handleClearAll = () => {
+    abortControllersRef.current.forEach((ctrl) => ctrl.abort());
+    abortControllersRef.current.clear();
     setFiles([]);
     setSelectedFileId(null);
     setError(null);
@@ -651,6 +577,27 @@ export default function App() {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
   };
 
+  const handleMappingChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 16 * 1024 * 1024) {
+      setError("Mapping file exceeds the 16 MiB limit.");
+      return;
+    }
+    try {
+      const text = await file.text();
+      if (!/^[^\s#]+\s+->\s+[^\s:]+:\s*$/m.test(text)) {
+        setError("Choose a valid ProGuard/R8/Mojang mapping file (mapping.txt).");
+        return;
+      }
+      setError(null);
+      setClassMapping({ name: file.name, text });
+    } catch {
+      setError("Failed to read mapping file.");
+    }
+  };
+
   return (
     <div className="min-h-[100dvh] h-[100dvh] bg-[#11100F] text-[#EAE5DE] flex flex-col font-sans overflow-hidden">
       <input
@@ -659,6 +606,13 @@ export default function App() {
         onChange={handleFileChange}
         accept=".class"
         multiple
+        className="hidden"
+      />
+      <input
+        type="file"
+        ref={mappingInputRef}
+        onChange={handleMappingChange}
+        accept=".txt,.map,.proguard"
         className="hidden"
       />
 
@@ -708,12 +662,16 @@ export default function App() {
             copied={copied}
             includeAnnotations={includeAnnotations}
             annotatingFileId={annotatingFileId}
+            mappingName={classMapping?.name || null}
             onToggleAnnotations={setIncludeAnnotations}
             onGenerateAnnotations={generateAnnotationsForFile}
+            onUploadMapping={() => mappingInputRef.current?.click()}
+            onClearMapping={() => setClassMapping(null)}
             onSelectFile={setSelectedFileId}
             onRemoveFile={handleRemoveFile}
             onClearAll={handleClearAll}
             onDecompileFile={decompileFile}
+            onCancelDecompile={cancelDecompile}
             onBulkDecompile={handleBulkDecompile}
             onSelectTab={setActiveTab}
             onSelectMethod={(idx, switchToBytecode) => {

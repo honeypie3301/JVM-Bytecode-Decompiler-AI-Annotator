@@ -3,6 +3,7 @@ import { ParsedClass } from "./classParser";
 export interface DecompiledResult {
   javaSource: string;
   classSummary: string;
+  summaryModel?: string;
   annotations: Array<{
     method: string;
     concept: string;
@@ -17,6 +18,9 @@ export interface DecompilerFile {
   size: number;
   status: "idle" | "parsing" | "parsed" | "decompiling" | "decompiled" | "failed";
   parsedClass?: ParsedClass;
+  rawBase64?: string;
+  envelopeSeal?: string;
+  mappingName?: string;
   decompiledResult?: DecompiledResult;
   decompileProgress?: string;
   error?: string;

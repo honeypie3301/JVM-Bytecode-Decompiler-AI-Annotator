@@ -3,6 +3,12 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 import dotenv from "dotenv";
+import {
+  CfrCancelledError,
+  CfrRestrictedError,
+  decompileClassWithCfr,
+  readClassMapping,
+} from "./src/services/cfr.js";
 
 dotenv.config();
 
@@ -10,100 +16,6 @@ const PRIMARY_GEMINI_MODEL = "gemini-4-hydrogen";
 const FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite";
 const DEFAULT_GPT_OSS_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_GPT_OSS_MODEL = "openai/gpt-oss-120b";
-
-const DECOMPILE_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    javaSource: {
-      type: Type.STRING,
-      description: "The complete, correct, and compilation-ready reconstructed high-level Java source code string",
-    },
-    classSummary: {
-      type: Type.STRING,
-      description: "A concise, developer-friendly summary of the class's purpose, design, and compiler details",
-    },
-    annotations: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          method: {
-            type: Type.STRING,
-            description: "Name of the method being annotated",
-          },
-          concept: {
-            type: Type.STRING,
-            description: "High-level concept, e.g. String Concatenation Optimization, or Exception Handling Flow",
-          },
-          explanation: {
-            type: Type.STRING,
-            description: "Detailed explanation of the JVM bytecode mechanics used for this concept",
-          },
-        },
-        required: ["method", "concept", "explanation"],
-      },
-      description: "List of annotations for various methods based on the bytecode disassembly",
-    },
-  },
-  required: ["javaSource", "classSummary", "annotations"],
-};
-
-const CHUNK_DECOMPILE_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    methodsCode: {
-      type: Type.STRING,
-      description:
-        "Complete reconstructed Java method and constructor implementations for this batch only, without package, imports, fields, or outer class wrapper",
-    },
-    annotations: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          method: {
-            type: Type.STRING,
-            description: "Name of the method being annotated",
-          },
-          concept: {
-            type: Type.STRING,
-            description: "High-level concept, e.g. String Concatenation Optimization, or Exception Handling Flow",
-          },
-          explanation: {
-            type: Type.STRING,
-            description: "Detailed explanation of the JVM bytecode mechanics used for this concept",
-          },
-        },
-        required: ["method", "concept", "explanation"],
-      },
-      description: "List of annotations for the methods in this batch",
-    },
-  },
-  required: ["methodsCode", "annotations"],
-};
-
-const FAST_DECOMPILE_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    javaSource: {
-      type: Type.STRING,
-      description: "The complete, compilation-ready reconstructed high-level Java source code string",
-    },
-  },
-  required: ["javaSource"],
-};
-
-const FAST_CHUNK_DECOMPILE_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    methodsCode: {
-      type: Type.STRING,
-      description:
-        "Complete reconstructed Java method and constructor implementations for this batch only, without package, imports, fields, or outer class wrapper",
-    },
-  },
-  required: ["methodsCode"],
-};
 
 const ANNOTATE_ONLY_SCHEMA = {
   type: Type.OBJECT,
@@ -138,46 +50,8 @@ const ANNOTATE_ONLY_SCHEMA = {
   required: ["classSummary", "annotations"],
 };
 
-const DECOMPILE_SYSTEM_INSTRUCTION =
-  "You are a world-class, high-speed Java decompiler. Respond strictly with a valid JSON object conforming to the requested schema. Ensure the reconstructed Java code is flawless, beautiful, and syntactically valid. Keep explanations extremely concise and direct to maximize decompilation speed.";
-
-function formatBytecodeDetails(details: string): string {
-  if (!details) return "";
-  const bracketMatch = details.match(/^#\d+\s+\[(.+)\]$/);
-  return bracketMatch ? bracketMatch[1] : details;
-}
-
-function formatCompactFields(fields: any[]): string {
-  if (!fields || fields.length === 0) return "none";
-  return fields
-    .map((f: any) => `${(f.accessFlagsNames || f.accessFlags || []).join(" ")} ${f.name}:${f.descriptor}`.trim())
-    .join("\n");
-}
-
-function formatCompactMethods(methods: any[]): string {
-  if (!methods || methods.length === 0) return "none";
-  return methods
-    .map((m: any) => {
-      const flags = (m.accessFlagsNames || m.accessFlags || []).join(" ");
-      const header = `${flags ? flags + " " : ""}${m.name}${m.descriptor}`;
-      if (!m.code) return `${header};`;
-      const meta = `[stack=${m.code.maxStack} locals=${m.code.maxLocals}]`;
-      const exc =
-        m.code.exceptionTable?.length > 0
-          ? `\n  catch: ${m.code.exceptionTable
-              .map((e: any) => `${e.startPc}..${e.endPc}->${e.handlerPc}:${e.catchClassName}`)
-              .join(", ")}`
-          : "";
-      const insns = (m.code.instructions || [])
-        .map((inst: any) => {
-          const d = inst.details ? ` ${formatBytecodeDetails(inst.details)}` : "";
-          return `  ${inst.offset}: ${inst.mnemonic}${d}`;
-        })
-        .join("\n");
-      return `${header} ${meta}${exc}${insns ? "\n" + insns : ""}`;
-    })
-    .join("\n\n");
-}
+const ANNOTATE_SYSTEM_INSTRUCTION =
+  "You are a senior Java systems engineer analyzing CFR-decompiled Java source code. Respond strictly with a valid JSON object matching the schema. Keep notes concise and technically accurate.";
 
 function extractReadableErrorMessage(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err || "Decompilation failed");
@@ -283,8 +157,6 @@ async function startServer() {
       })
     : null;
 
-  const decompileCache = new Map<string, any>();
-
   function isTransientCapacityError(err: unknown): boolean {
     const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
     return (
@@ -299,29 +171,20 @@ async function startServer() {
     );
   }
 
-  async function runDecompileWithFallback(
-    prompt: string,
-    schema: any = DECOMPILE_SCHEMA,
-    fastMode: boolean = false
-  ) {
+  async function runAnnotateWithFallback(prompt: string, signal?: AbortSignal) {
     let lastError: unknown;
 
     if (ai) {
-      const attemptSchedule = fastMode
-        ? [
-            { model: FALLBACK_GEMINI_MODEL, thinking: ThinkingLevel.MINIMAL },
-            { model: PRIMARY_GEMINI_MODEL, thinking: ThinkingLevel.LOW },
-            { model: FALLBACK_GEMINI_MODEL, thinking: ThinkingLevel.MINIMAL },
-            { model: PRIMARY_GEMINI_MODEL, thinking: ThinkingLevel.LOW },
-          ]
-        : [
-            { model: PRIMARY_GEMINI_MODEL, thinking: ThinkingLevel.LOW },
-            { model: FALLBACK_GEMINI_MODEL, thinking: ThinkingLevel.MINIMAL },
-            { model: PRIMARY_GEMINI_MODEL, thinking: ThinkingLevel.LOW },
-            { model: FALLBACK_GEMINI_MODEL, thinking: ThinkingLevel.MINIMAL },
-          ];
+      const attemptSchedule = [
+        { model: PRIMARY_GEMINI_MODEL, thinking: ThinkingLevel.LOW },
+        { model: FALLBACK_GEMINI_MODEL, thinking: ThinkingLevel.MINIMAL },
+        { model: PRIMARY_GEMINI_MODEL, thinking: ThinkingLevel.LOW },
+      ];
 
       for (let i = 0; i < attemptSchedule.length; i++) {
+        if (signal?.aborted) {
+          throw new CfrCancelledError("Annotation cancelled");
+        }
         const { model, thinking } = attemptSchedule[i];
         try {
           const response = await ai.models.generateContent({
@@ -330,160 +193,147 @@ async function startServer() {
             config: {
               thinkingConfig: { thinkingLevel: thinking },
               responseMimeType: "application/json",
-              responseSchema: schema,
-              systemInstruction: DECOMPILE_SYSTEM_INSTRUCTION,
+              responseSchema: ANNOTATE_ONLY_SCHEMA,
+              systemInstruction: ANNOTATE_SYSTEM_INSTRUCTION,
             },
           });
           if (response.text) {
-            return parseJsonResponse(response.text);
+            return { ...parseJsonResponse(response.text), summaryModel: model };
           }
           throw new Error(`Empty response from ${model}`);
         } catch (err) {
           lastError = err;
+          if (signal?.aborted) {
+            throw new CfrCancelledError("Annotation cancelled");
+          }
           const isLastAttempt = i === attemptSchedule.length - 1;
           if (isLastAttempt) break;
 
           const transient = isTransientCapacityError(err);
-          // First fallback to the alternate model immediately; wait with backoff on subsequent retries
           if (i === 0 && transient) {
             await sleep(250);
             continue;
           }
-
           if (transient) {
-            const retryMs = extractRetryDelayMs(err) ?? (i === 1 ? 1800 : 3500) + Math.floor(Math.random() * 400);
-            console.warn(`Model ${model} busy/rate-limited; retrying in ${retryMs}ms`);
+            const retryMs = extractRetryDelayMs(err) ?? 1800 + Math.floor(Math.random() * 400);
             await sleep(retryMs);
             continue;
           }
-
           await sleep(300);
         }
       }
     }
 
-    // Optional GPT-OSS 120B OpenAI-compatible fallback
     if (process.env.GPT_OSS_API_KEY) {
-      console.warn("Gemini unavailable; falling back to GPT-OSS 120B");
-      const raw = await callGptOssFallback(DECOMPILE_SYSTEM_INSTRUCTION, prompt, true);
-      return parseJsonResponse(raw);
+      const raw = await callGptOssFallback(ANNOTATE_SYSTEM_INSTRUCTION, prompt, true);
+      return {
+        ...parseJsonResponse(raw),
+        summaryModel: process.env.GPT_OSS_MODEL || DEFAULT_GPT_OSS_MODEL,
+      };
     }
 
-    throw lastError instanceof Error ? lastError : new Error("Decompilation failed");
+    throw lastError instanceof Error ? lastError : new Error("AI annotation unavailable");
   }
 
-  // API Route for AI Decompilation and Source Reconstruction
+  // API Route for CFR Bytecode Decompilation & Optional AI Annotation
   app.post("/api/decompile", async (req, res) => {
-    try {
-      const { classData, chunk, includeAnnotations = true, mode, javaSource } = req.body;
-
-      if (!apiKey && !process.env.GPT_OSS_API_KEY) {
-        return res.status(500).json({
-          error: "GEMINI_API_KEY environment variable is not configured. Please configure it in Settings > Secrets.",
-        });
+    const abortController = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        abortController.abort();
       }
+    });
+
+    try {
+      const {
+        classBytesBase64,
+        fileName,
+        mappingText,
+        classData,
+        includeAnnotations = false,
+        mode,
+        javaSource,
+      } = req.body;
 
       if (mode === "annotate") {
+        if (!apiKey && !process.env.GPT_OSS_API_KEY) {
+          return res.status(500).json({
+            error: "GEMINI_API_KEY environment variable is not configured. Please configure it in Settings > Secrets.",
+          });
+        }
         if (!javaSource) {
           return res.status(400).json({ error: "Missing Java source for annotation" });
         }
         const truncatedSource = String(javaSource).slice(0, 45000);
-        const annotatePrompt = `Analyze this reconstructed Java class (${classData?.thisClassName || "Class"}, target ${classData?.jdkVersion || "Java"}) and produce a concise classSummary plus high-value method bytecode/architectural annotations (up to 12 most important methods).
+        const annotatePrompt = `Analyze this CFR-decompiled Java class (${classData?.thisClassName || "Class"}, target ${classData?.jdkVersion || "Java"}) and produce a concise classSummary plus high-value method bytecode/architectural annotations (up to 12 most important methods).
 
 \`\`\`java
 ${truncatedSource}
 \`\`\``;
-        const result = await runDecompileWithFallback(annotatePrompt, ANNOTATE_ONLY_SCHEMA, false);
+        const result = await runAnnotateWithFallback(annotatePrompt, abortController.signal);
+        if (abortController.signal.aborted) return;
         return res.json(result);
       }
 
-      if (!classData) {
-        return res.status(400).json({ error: "Missing class data" });
+      if (!classBytesBase64 || typeof classBytesBase64 !== "string") {
+        return res.status(400).json({ error: "Missing binary .class payload for CFR decompilation." });
       }
 
-      const wantAnnotations = Boolean(includeAnnotations);
-      const fieldsText = formatCompactFields(classData.fields || []);
-      const methodsText = formatCompactMethods(classData.methods || []);
-      const chunkTag = chunk ? `chunk:${chunk.index}/${chunk.total}` : "full";
-      const modeTag = wantAnnotations ? "annotated" : "fast";
-      const cacheKey = `${modeTag}|${chunkTag}|${classData.thisClassName}|${classData.superClassName}|${classData.majorVersion}|${fieldsText}|${methodsText}`;
+      const bytes = new Uint8Array(Buffer.from(classBytesBase64, "base64"));
+      const mapping = readClassMapping(mappingText);
 
-      const cached = decompileCache.get(cacheKey);
-      if (cached) {
-        return res.json(cached);
+      const cfrSource = await decompileClassWithCfr(bytes, {
+        mapping,
+        fileName: typeof fileName === "string" ? fileName : undefined,
+        signal: abortController.signal,
+      });
+
+      if (abortController.signal.aborted) return;
+
+      let classSummary = "";
+      let summaryModel: string | undefined;
+      let annotations: Array<{ method: string; concept: string; explanation: string }> = [];
+
+      if (includeAnnotations && (apiKey || process.env.GPT_OSS_API_KEY)) {
+        try {
+          const truncatedSource = cfrSource.slice(0, 45000);
+          const annotatePrompt = `Analyze this CFR-decompiled Java class (${classData?.thisClassName || fileName || "Class"}, target ${classData?.jdkVersion || "Java"}) and produce a concise classSummary plus high-value method architectural annotations (up to 12 most important methods).
+
+\`\`\`java
+${truncatedSource}
+\`\`\``;
+          const noteResult = await runAnnotateWithFallback(annotatePrompt, abortController.signal);
+          classSummary = noteResult?.classSummary || "";
+          summaryModel = noteResult?.summaryModel;
+          annotations = Array.isArray(noteResult?.annotations) ? noteResult.annotations : [];
+        } catch (annotErr) {
+          if (abortController.signal.aborted) return;
+          console.warn("Optional AI annotation skipped:", extractReadableErrorMessage(annotErr));
+        }
       }
 
-      const isFollowUpChunk = Boolean(chunk && chunk.index > 0);
-      const batchNote = chunk
-        ? isFollowUpChunk
-          ? `\nBatch ${chunk.index + 1} of ${chunk.total}: Reconstruct ONLY the methods listed below. Do NOT output package, imports, fields, or the outer class declaration.`
-          : `\nBatch 1 of ${chunk.total} for a large class: Reconstruct the package declaration, imports, class header, ALL fields listed below, and ONLY the methods in this batch inside the class body (closing with '}').`
-        : "";
+      if (abortController.signal.aborted) return;
 
-      const prompt = wantAnnotations
-        ? `You are an expert JVM bytecode decompiler and senior Java systems engineer specializing in Java reverse engineering, compiler design, and platform-level optimization.
-Reconstruct high-level Java source code from the parsed JVM class structure and javap-style bytecode disassembly, and provide educational annotations.${batchNote}
-
-Class: ${classData.thisClassName}
-Extends: ${classData.superClassName}
-Implements: ${(classData.interfaces || []).join(", ") || "none"}
-Target: ${classData.jdkVersion} (Major ${classData.majorVersion})
-Modifiers: ${(classData.accessFlagsNames || []).join(" ") || "package-private"}
-
-Fields:
-${fieldsText}
-
-Methods & Bytecode:
-${methodsText}
-
-Core Requirements:
-1. Reconstruct accurate, compilation-ready Java source code preserving annotations, fields, initializers, exception handlers, and method signatures.
-2. Resolve local variables into natural, readable names based on bytecode usage.
-3. Reconstruct standard Java control structures (if-else, loops, switch, try-catch-finally) from branch targets.
-4. Minecraft Mod Support: Recognize Forge/NeoForge/Fabric APIs and MCreator patterns when present and add modding-specific annotations.
-5. Provide concise inline comments/annotations explaining bytecode mechanics and compiler artifacts.`
-        : `Reconstruct clean, accurate, compilation-ready Java source code from this JVM bytecode disassembly. Output ONLY pure Java code—omit Javadocs, summary prose, and explanatory comments to maximize speed.${batchNote}
-
-Class: ${classData.thisClassName}
-Extends: ${classData.superClassName}
-Implements: ${(classData.interfaces || []).join(", ") || "none"}
-Target: ${classData.jdkVersion} (Major ${classData.majorVersion})
-Modifiers: ${(classData.accessFlagsNames || []).join(" ") || "package-private"}
-
-Fields:
-${fieldsText}
-
-Methods & Bytecode:
-${methodsText}
-
-Rules: Preserve all field/method signatures, exception handlers, control flow (if-else, loops, switch, try-catch), and readable local variable names.`;
-
-      const schema = wantAnnotations
-        ? isFollowUpChunk
-          ? CHUNK_DECOMPILE_SCHEMA
-          : DECOMPILE_SCHEMA
-        : isFollowUpChunk
-          ? FAST_CHUNK_DECOMPILE_SCHEMA
-          : FAST_DECOMPILE_SCHEMA;
-
-      const rawResult = await runDecompileWithFallback(prompt, schema, !wantAnnotations);
-      const parsedResult = wantAnnotations
-        ? rawResult
-        : {
-            ...rawResult,
-            classSummary: "",
-            annotations: [],
-          };
-
-      if (decompileCache.size >= 100) {
-        const oldestKey = decompileCache.keys().next().value;
-        if (oldestKey) decompileCache.delete(oldestKey);
-      }
-      decompileCache.set(cacheKey, parsedResult);
-
-      res.json(parsedResult);
+      res.json({
+        javaSource: cfrSource,
+        classSummary,
+        summaryModel,
+        annotations,
+      });
     } catch (error: any) {
-      console.error("Decompilation error:", error);
+      if (error instanceof CfrCancelledError || abortController.signal.aborted) {
+        if (!res.headersSent) {
+          res.status(499).json({ cancelled: true, error: "Decompilation cancelled" });
+        }
+        return;
+      }
+      if (error instanceof CfrRestrictedError) {
+        return res.status(403).json({
+          restricted: true,
+          error: "Restricted bytecode signature detected. Source reconstruction is disabled.",
+        });
+      }
+      console.error("CFR decompilation error:", error);
       res.status(500).json({ error: extractReadableErrorMessage(error) });
     }
   });

@@ -12,9 +12,16 @@ import {
   Loader2,
   FileCode2,
   ChevronDown,
+  Square,
+  Upload,
 } from "lucide-react";
 import { DecompilerFile, WorkspaceTab } from "../types";
 import { WARM_OBSIDIAN_THEME } from "../theme";
+import {
+  VirtualBytecodeViewer,
+  VirtualCodeViewer,
+  VirtualConstantPoolViewer,
+} from "./VirtualViewers";
 
 interface WorkspaceViewProps {
   files: DecompilerFile[];
@@ -25,12 +32,16 @@ interface WorkspaceViewProps {
   copied: boolean;
   includeAnnotations: boolean;
   annotatingFileId: string | null;
+  mappingName: string | null;
   onToggleAnnotations: (val: boolean) => void;
   onGenerateAnnotations: (fileId: string) => void;
+  onUploadMapping: () => void;
+  onClearMapping: () => void;
   onSelectFile: (fileId: string) => void;
   onRemoveFile: (fileId: string, e: React.MouseEvent) => void;
   onClearAll: () => void;
   onDecompileFile: (fileId: string) => void;
+  onCancelDecompile: (fileId: string) => void;
   onBulkDecompile: () => void;
   onSelectTab: (tab: WorkspaceTab) => void;
   onSelectMethod: (idx: number, switchToBytecode?: boolean) => void;
@@ -140,12 +151,16 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   copied,
   includeAnnotations,
   annotatingFileId,
+  mappingName,
   onToggleAnnotations,
   onGenerateAnnotations,
+  onUploadMapping,
+  onClearMapping,
   onSelectFile,
   onRemoveFile,
   onClearAll,
   onDecompileFile,
+  onCancelDecompile,
   onBulkDecompile,
   onSelectTab,
   onSelectMethod,
@@ -156,14 +171,41 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   onDrop,
   formatSize,
 }) => {
+  const SUMMARY_STORAGE_KEY = "jadai.summaryWidthPct";
+  const DEFAULT_SUMMARY_PCT = 41.67;
+
+  const readSavedSummaryWidth = () => {
+    try {
+      const raw = localStorage.getItem(SUMMARY_STORAGE_KEY);
+      if (!raw) return DEFAULT_SUMMARY_PCT;
+      const parsed = Number.parseFloat(raw);
+      return Number.isFinite(parsed) ? Math.min(70, Math.max(22, parsed)) : DEFAULT_SUMMARY_PCT;
+    } catch {
+      return DEFAULT_SUMMARY_PCT;
+    }
+  };
+
   const [cpSearch, setCpSearch] = useState("");
   const [isMethodMenuOpen, setIsMethodMenuOpen] = useState(false);
   const [isMobileRailOpen, setIsMobileRailOpen] = useState(false);
-  const [summaryWidthPct, setSummaryWidthPct] = useState(41.67);
+  const [summaryWidthPct, setSummaryWidthPct] = useState<number>(readSavedSummaryWidth);
   const [isResizingSummary, setIsResizingSummary] = useState(false);
 
   const methodMenuRef = useRef<HTMLDivElement>(null);
   const sourceSplitRef = useRef<HTMLDivElement>(null);
+  const summaryPaneRef = useRef<HTMLDivElement>(null);
+  const latestSummaryWidthRef = useRef<number>(summaryWidthPct);
+
+  const persistSummaryWidth = (pct: number) => {
+    const clamped = Math.round(Math.min(70, Math.max(22, pct)) * 100) / 100;
+    latestSummaryWidthRef.current = clamped;
+    setSummaryWidthPct(clamped);
+    try {
+      localStorage.setItem(SUMMARY_STORAGE_KEY, String(clamped));
+    } catch {
+      // ignore storage errors
+    }
+  };
 
   useEffect(() => {
     const handlePointerDownOutside = (e: MouseEvent) => {
@@ -191,17 +233,35 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   useEffect(() => {
     if (!isResizingSummary) return;
 
+    let rafId: number | null = null;
+    let pendingPct = latestSummaryWidthRef.current;
+
+    const applyWidth = () => {
+      rafId = null;
+      if (summaryPaneRef.current) {
+        summaryPaneRef.current.style.setProperty("--summary-width", `${pendingPct}%`);
+      }
+    };
+
     const handlePointerMove = (e: PointerEvent) => {
       const container = sourceSplitRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
       if (rect.width <= 0) return;
       const rawPct = ((rect.right - e.clientX) / rect.width) * 100;
-      const clampedPct = Math.min(70, Math.max(22, rawPct));
-      setSummaryWidthPct(clampedPct);
+      pendingPct = Math.round(Math.min(70, Math.max(22, rawPct)) * 100) / 100;
+      latestSummaryWidthRef.current = pendingPct;
+      if (rafId === null) {
+        rafId = requestAnimationFrame(applyWidth);
+      }
     };
 
     const handlePointerUp = () => {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      persistSummaryWidth(latestSummaryWidthRef.current);
       setIsResizingSummary(false);
     };
 
@@ -211,6 +271,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     window.addEventListener("pointerup", handlePointerUp);
 
     return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
       window.removeEventListener("pointermove", handlePointerMove);
@@ -371,11 +432,25 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                         e.stopPropagation();
                         onDecompileFile(file.id);
                       }}
-                      title="Reconstruct source"
+                      title="Decompile with CFR"
                       aria-label={`Decompile ${file.name}`}
                       className="w-7 h-7 rounded-md flex items-center justify-center text-[#C5A880] hover:bg-[#2A2623] transition-colors cursor-pointer"
                     >
                       <Play className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  {file.status === "decompiling" && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCancelDecompile(file.id);
+                      }}
+                      title="Cancel reconstruction"
+                      aria-label={`Cancel reconstruction for ${file.name}`}
+                      className="w-7 h-7 rounded-md flex items-center justify-center text-[#C76E6E] hover:bg-[#2A2623] transition-colors cursor-pointer"
+                    >
+                      <Square className="w-3 h-3 fill-current" />
                     </button>
                   )}
                   <button
@@ -405,6 +480,45 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             </button>
           </div>
         )}
+
+        {/* ProGuard / R8 / Mojang Deobfuscation Mapping */}
+        <div className="px-3 py-2.5 border-b border-[#2A2623] shrink-0">
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <span className="text-[11px] font-medium text-[#706961]">Deobfuscation Mapping</span>
+            {mappingName && (
+              <button
+                type="button"
+                onClick={onClearMapping}
+                className="text-[11px] text-[#706961] hover:text-[#C76E6E] transition-colors cursor-pointer"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          {mappingName ? (
+            <div className="px-2.5 py-1.5 rounded-md bg-[#181614] border border-[#2E2A26] flex items-center justify-between gap-2">
+              <span className="font-mono text-[11px] text-[#C5A880] truncate" title={mappingName}>
+                {mappingName}
+              </span>
+              <button
+                type="button"
+                onClick={onUploadMapping}
+                className="text-[10px] text-[#A69E94] hover:text-[#EAE5DE] shrink-0 cursor-pointer"
+              >
+                Replace
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onUploadMapping}
+              className="w-full py-1.5 px-2.5 rounded-md bg-[#181614] hover:bg-[#1F1C1A] border border-[#2A2623] hover:border-[#35302B] text-[11px] text-[#A69E94] hover:text-[#EAE5DE] transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Upload className="w-3 h-3 text-[#C5A880]" />
+              <span>Load mapping.txt</span>
+            </button>
+          )}
+        </div>
 
         {/* Class Outline (Metadata, Fields, Methods) */}
         <div className="flex-1 flex flex-col min-h-0 border-t border-[#2A2623]">
@@ -533,6 +647,17 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
           </div>
 
           <div className="flex items-center flex-wrap gap-2 sm:gap-2.5 shrink-0">
+            {activeFile && activeFile.status === "decompiling" && (
+              <button
+                type="button"
+                onClick={() => onCancelDecompile(activeFile.id)}
+                className="inline-flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-lg bg-[#261818] hover:bg-[#332020] border border-[#5A3232] text-[#E6A3A3] text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Square className="w-3 h-3 fill-current" />
+                <span>Cancel Reconstruction</span>
+              </button>
+            )}
+
             {activeFile && !activeFile.isProtected && (activeFile.status === "parsed" || activeFile.status === "failed") && (
               <>
                 <label
@@ -572,6 +697,15 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
             {decompiledResult && (
               <>
+                <button
+                  type="button"
+                  onClick={() => activeFile && onDecompileFile(activeFile.id)}
+                  title="Re-run CFR decompilation (applies current mapping)"
+                  className="inline-flex items-center gap-1.5 px-3 sm:px-3.5 py-2 rounded-lg bg-[#181614] hover:bg-[#221F1C] border border-[#2A2623] text-xs font-medium text-[#EAE5DE] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-[#C5A880]" />
+                  <span>Re-decompile</span>
+                </button>
                 <button
                   type="button"
                   onClick={onCopyCode}
@@ -652,13 +786,21 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                       Reconstructing Java source
                     </h3>
                     <p className="mt-1.5 text-sm text-[#A69E94]">
-                      Analyzing control flow, resolving local variable types, and preparing compiler notes.
+                      Decompiling JVM bytecode deterministically with CFR 0.152.
                     </p>
                     {activeFile.decompileProgress && (
                       <p className="mt-3 font-mono text-xs text-[#C5A880] tabular-nums">
                         {activeFile.decompileProgress}
                       </p>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => onCancelDecompile(activeFile.id)}
+                      className="mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#261818] hover:bg-[#332020] border border-[#5A3232] text-xs font-medium text-[#E6A3A3] transition-colors cursor-pointer shrink-0"
+                    >
+                      <Square className="w-3 h-3 fill-current" />
+                      <span>Cancel Reconstruction</span>
+                    </button>
                   </div>
                 </div>
               ) : decompiledResult ? (
@@ -669,23 +811,17 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                   {/* Source Code Pane */}
                   <div className="flex-1 min-w-0 border-b xl:border-b-0 bg-[#141210] flex flex-col min-h-[320px] xl:min-h-0 overflow-hidden">
                     <div className="px-5 py-2.5 border-b border-[#24211E] flex items-center justify-between text-xs text-[#706961] shrink-0">
-                      <span className="font-mono text-[#A69E94]">{simpleClassName}.java</span>
-                      <span className="tabular-nums">{sourceLines.length} lines</span>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-[#A69E94] truncate">{simpleClassName}.java</span>
+                        {activeFile?.mappingName && (
+                          <span className="font-mono text-[11px] text-[#7EA287] truncate">
+                            · {activeFile.mappingName}
+                          </span>
+                        )}
+                      </div>
+                      <span className="tabular-nums shrink-0">{sourceLines.length} lines</span>
                     </div>
-                    <div className="flex-1 overflow-auto py-4 px-3 font-mono text-[13px] leading-[1.7] text-[#EAE5DE] select-text">
-                      <table className="w-full border-collapse">
-                        <tbody>
-                          {sourceLines.map((line, i) => (
-                            <tr key={i} className="hover:bg-[#1A1815]">
-                              <td className="w-10 pr-4 text-right select-none text-[#57514B] text-xs tabular-nums align-top">
-                                {i + 1}
-                              </td>
-                              <td className="whitespace-pre pr-4">{line || " "}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    <VirtualCodeViewer lines={sourceLines} />
                   </div>
 
                   {/* Draggable Summary Edge Handle */}
@@ -696,16 +832,17 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                     tabIndex={0}
                     onPointerDown={(e) => {
                       e.preventDefault();
+                      latestSummaryWidthRef.current = summaryWidthPct;
                       setIsResizingSummary(true);
                     }}
-                    onDoubleClick={() => setSummaryWidthPct(41.67)}
+                    onDoubleClick={() => persistSummaryWidth(DEFAULT_SUMMARY_PCT)}
                     onKeyDown={(e) => {
                       if (e.key === "ArrowLeft") {
                         e.preventDefault();
-                        setSummaryWidthPct((prev) => Math.min(70, prev + 2));
+                        persistSummaryWidth(summaryWidthPct + 2);
                       } else if (e.key === "ArrowRight") {
                         e.preventDefault();
-                        setSummaryWidthPct((prev) => Math.max(22, prev - 2));
+                        persistSummaryWidth(summaryWidthPct - 2);
                       }
                     }}
                     className={`hidden xl:flex w-1.5 -ml-[3px] z-10 shrink-0 cursor-col-resize items-center justify-center group focus:outline-none ${
@@ -723,6 +860,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
                   {/* Class Summary & AI Annotations Pane */}
                   <div
+                    ref={summaryPaneRef}
                     style={{ ["--summary-width" as string]: `${summaryWidthPct}%` }}
                     className={`w-full xl:w-[var(--summary-width)] xl:shrink-0 bg-[#11100F] flex flex-col overflow-y-auto ${
                       hasSummaryOrNotes ? "min-h-[220px] xl:min-h-0" : "shrink-0 xl:min-h-0"
@@ -757,7 +895,17 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                     ) : (
                       <>
                         <div className="p-5 sm:p-6 border-b border-[#24211E]">
-                          <h3 className="text-xs font-medium text-[#C5A880] mb-2">Class Summary</h3>
+                          <div className="flex items-center justify-between gap-2 mb-2">
+                            <h3 className="text-xs font-medium text-[#C5A880]">Class Summary</h3>
+                            {decompiledResult.summaryModel && (
+                              <span
+                                className="font-mono text-[11px] text-[#706961] truncate"
+                                title={`Model: ${decompiledResult.summaryModel}`}
+                              >
+                                {decompiledResult.summaryModel}
+                              </span>
+                            )}
+                          </div>
                           <p className="text-sm text-[#C4BCB3] leading-relaxed">
                             {decompiledResult.classSummary}
                           </p>
@@ -961,34 +1109,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                     {/* Bytecode Table */}
                     <div className="xl:col-span-7 border-b xl:border-b-0 xl:border-r border-[#2A2623] bg-[#141210] flex flex-col min-h-[280px] xl:min-h-0 overflow-hidden">
                       {selectedMethod.code && selectedMethod.code.instructions.length > 0 ? (
-                        <div className="flex-1 overflow-auto">
-                          <table className="w-full text-left border-collapse font-mono text-xs">
-                            <thead className="sticky top-0 bg-[#181614] border-b border-[#2A2623] text-[#706961] text-[11px]">
-                              <tr>
-                                <th className="py-2.5 px-4 font-medium w-20">Offset</th>
-                                <th className="py-2.5 px-3 font-medium w-20">Opcode</th>
-                                <th className="py-2.5 px-3 font-medium w-36">Mnemonic</th>
-                                <th className="py-2.5 px-4 font-medium">Operands &amp; Target</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-[#201D1A] tabular-nums">
-                              {selectedMethod.code.instructions.map((inst, i) => (
-                                <tr key={i} className="hover:bg-[#1B1917] transition-colors">
-                                  <td className="py-2.5 px-4 text-[#706961]">{inst.offset}</td>
-                                  <td className="py-2.5 px-3 text-[#A69E94]">
-                                    0x{inst.opcode.toString(16).padStart(2, "0").toUpperCase()}
-                                  </td>
-                                  <td className="py-2.5 px-3 text-[#C5A880] font-medium">
-                                    {inst.mnemonic}
-                                  </td>
-                                  <td className="py-2.5 px-4 text-[#EAE5DE] break-all">
-                                    {inst.details || "—"}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
+                        <VirtualBytecodeViewer instructions={selectedMethod.code.instructions} />
                       ) : (
                         <div className="flex-1 flex items-center justify-center p-10 text-xs text-[#706961]">
                           This method is abstract or native and contains no bytecode attribute.
@@ -1043,26 +1164,9 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                     </span>
                   </div>
 
-                  <div className="flex-1 overflow-auto bg-[#141210]">
+                  <div className="flex-1 min-h-0 flex flex-col bg-[#141210] overflow-hidden">
                     {filteredConstantPool.length > 0 ? (
-                      <table className="w-full text-left border-collapse font-mono text-xs">
-                        <thead className="sticky top-0 bg-[#181614] border-b border-[#2A2623] text-[#706961] text-[11px]">
-                          <tr>
-                            <th className="py-2.5 px-6 font-medium w-24">Index</th>
-                            <th className="py-2.5 px-4 font-medium w-40">Tag</th>
-                            <th className="py-2.5 px-6 font-medium">Resolved Value</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-[#201D1A] tabular-nums">
-                          {filteredConstantPool.map((cp) => (
-                            <tr key={cp.index} className="hover:bg-[#1B1917] transition-colors">
-                              <td className="py-2.5 px-6 text-[#706961]">#{cp.index}</td>
-                              <td className="py-2.5 px-4 text-[#C5A880]">{cp.tagName}</td>
-                              <td className="py-2.5 px-6 text-[#EAE5DE] break-all">{cp.details}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                      <VirtualConstantPoolViewer entries={filteredConstantPool} />
                     ) : (
                       <div className="py-16 text-center text-xs text-[#706961]">
                         No constant pool entries match "{cpSearch}".

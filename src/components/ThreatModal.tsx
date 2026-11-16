@@ -31,9 +31,9 @@ export const ThreatModal: React.FC<ThreatModalProps> = ({ threat, onDismiss }) =
         </div>
 
         <p className="text-sm text-[#A69E94] leading-relaxed">
-          The file <span className="font-mono text-[#EAE5DE]">{threat.fileName}</span> matches the protected
-          package signature <span className="font-mono text-[#D99B9B]">net.mcreator.thebackwoods</span>. Source
-          reconstruction for this mod is disabled and this attempt has been logged.
+          The file <span className="font-mono text-[#EAE5DE]">{threat.fileName}</span> matches a{" "}
+          <span className="font-mono text-[#D99B9B]">restricted bytecode signature</span>. Source
+          reconstruction for this artifact is disabled and this attempt has been logged.
         </p>
 
         <div className="mt-5 pt-4 border-t border-[#2E2323] flex items-center justify-between text-xs font-mono text-[#706961] tabular-nums">

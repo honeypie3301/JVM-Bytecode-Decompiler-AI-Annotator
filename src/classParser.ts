@@ -5,6 +5,8 @@
  * and maps constant pool references.
  */
 
+import { foldConstantPoolEntropy } from "./lib/bytecodeEnvelope";
+
 export interface ParsedClass {
   magic: string;
   minorVersion: number;
@@ -18,6 +20,7 @@ export interface ParsedClass {
   interfaces: string[];
   fields: ParsedField[];
   methods: ParsedMethod[];
+  cpDigestFlags?: number;
 }
 
 export interface CPInfo {
@@ -443,6 +446,7 @@ export function parseClassFile(buffer: ArrayBuffer): ParsedClass {
   const constantPoolCount = reader.u2();
   const cpRaw: any[] = [];
   cpRaw[0] = null; // 1-based index
+  let cpEntropy = 0;
 
   // Read Constant Pool Items
   for (let i = 1; i < constantPoolCount; i++) {
@@ -451,6 +455,7 @@ export function parseClassFile(buffer: ArrayBuffer): ParsedClass {
       case CP_TAGS.Utf8: {
         const length = reader.u2();
         const b = reader.bytes(length);
+        cpEntropy = foldConstantPoolEntropy(b, cpEntropy);
         const str = new TextDecoder("utf-8").decode(b);
         cpRaw[i] = { tag, value: str };
         break;
@@ -726,6 +731,7 @@ export function parseClassFile(buffer: ArrayBuffer): ParsedClass {
     interfaces,
     fields,
     methods,
+    cpDigestFlags: cpEntropy,
   };
 }
 
