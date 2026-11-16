@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Play,
   X,
@@ -11,6 +11,7 @@ import {
   Lock,
   Loader2,
   FileCode2,
+  ChevronDown,
 } from "lucide-react";
 import { DecompilerFile, WorkspaceTab } from "../types";
 
@@ -116,6 +117,65 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   formatSize,
 }) => {
   const [cpSearch, setCpSearch] = useState("");
+  const [isMethodMenuOpen, setIsMethodMenuOpen] = useState(false);
+  const [summaryWidthPct, setSummaryWidthPct] = useState(41.67);
+  const [isResizingSummary, setIsResizingSummary] = useState(false);
+
+  const methodMenuRef = useRef<HTMLDivElement>(null);
+  const sourceSplitRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handlePointerDownOutside = (e: MouseEvent) => {
+      if (methodMenuRef.current && !methodMenuRef.current.contains(e.target as Node)) {
+        setIsMethodMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsMethodMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDownOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDownOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    setIsMethodMenuOpen(false);
+  }, [selectedFileId, activeTab]);
+
+  useEffect(() => {
+    if (!isResizingSummary) return;
+
+    const handlePointerMove = (e: PointerEvent) => {
+      const container = sourceSplitRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const rawPct = ((rect.right - e.clientX) / rect.width) * 100;
+      const clampedPct = Math.min(70, Math.max(22, rawPct));
+      setSummaryWidthPct(clampedPct);
+    };
+
+    const handlePointerUp = () => {
+      setIsResizingSummary(false);
+    };
+
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+
+    return () => {
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [isResizingSummary]);
 
   const activeFile = files.find((f) => f.id === selectedFileId) || null;
   const parsedClass = activeFile?.parsedClass || null;
@@ -481,9 +541,12 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                   </p>
                 </div>
               ) : decompiledResult ? (
-                <div className="flex-1 min-h-0 grid grid-cols-1 xl:grid-cols-12 overflow-hidden">
+                <div
+                  ref={sourceSplitRef}
+                  className="flex-1 min-h-0 flex flex-col xl:flex-row overflow-hidden"
+                >
                   {/* Source Code Pane */}
-                  <div className="xl:col-span-7 border-b xl:border-b-0 xl:border-r border-[#2A2623] bg-[#141210] flex flex-col min-h-[320px] xl:min-h-0 overflow-hidden">
+                  <div className="flex-1 min-w-0 border-b xl:border-b-0 bg-[#141210] flex flex-col min-h-[320px] xl:min-h-0 overflow-hidden">
                     <div className="px-5 py-2.5 border-b border-[#24211E] flex items-center justify-between text-xs text-[#706961] shrink-0">
                       <span className="font-mono text-[#A69E94]">{simpleClassName}.java</span>
                       <span className="tabular-nums">{sourceLines.length} lines</span>
@@ -504,8 +567,44 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                     </div>
                   </div>
 
+                  {/* Draggable Summary Edge Handle */}
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize summary panel"
+                    tabIndex={0}
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      setIsResizingSummary(true);
+                    }}
+                    onDoubleClick={() => setSummaryWidthPct(41.67)}
+                    onKeyDown={(e) => {
+                      if (e.key === "ArrowLeft") {
+                        e.preventDefault();
+                        setSummaryWidthPct((prev) => Math.min(70, prev + 2));
+                      } else if (e.key === "ArrowRight") {
+                        e.preventDefault();
+                        setSummaryWidthPct((prev) => Math.max(22, prev - 2));
+                      }
+                    }}
+                    className={`hidden xl:flex w-1.5 -ml-[3px] z-10 shrink-0 cursor-col-resize items-center justify-center group focus:outline-none ${
+                      isResizingSummary ? "bg-[#C5A880]/20" : "hover:bg-[#C5A880]/10"
+                    }`}
+                  >
+                    <div
+                      className={`w-px h-full transition-colors ${
+                        isResizingSummary
+                          ? "bg-[#C5A880]"
+                          : "bg-[#2A2623] group-hover:bg-[#C5A880]/70 group-focus-visible:bg-[#C5A880]"
+                      }`}
+                    />
+                  </div>
+
                   {/* Class Summary & AI Annotations Pane */}
-                  <div className="xl:col-span-5 bg-[#11100F] flex flex-col min-h-[260px] xl:min-h-0 overflow-y-auto">
+                  <div
+                    style={{ ["--summary-width" as string]: `${summaryWidthPct}%` }}
+                    className="w-full xl:w-[var(--summary-width)] xl:shrink-0 bg-[#11100F] flex flex-col min-h-[260px] xl:min-h-0 overflow-y-auto"
+                  >
                     <div className="p-6 border-b border-[#24211E]">
                       <h3 className="text-xs font-medium text-[#C5A880] mb-2">Class Summary</h3>
                       <p className="text-sm text-[#C4BCB3] leading-relaxed">
@@ -610,22 +709,65 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                 <>
                   {/* Method Telemetry Header */}
                   <div className="px-6 py-3 border-b border-[#24211E] bg-[#141210] flex flex-wrap items-center justify-between gap-4 shrink-0">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <label htmlFor="method-select" className="text-xs text-[#706961] shrink-0">
+                    <div className="flex items-center gap-3 min-w-0" ref={methodMenuRef}>
+                      <span id="method-select-label" className="text-xs text-[#706961] shrink-0">
                         Method
-                      </label>
-                      <select
-                        id="method-select"
-                        value={selectedMethodIdx}
-                        onChange={(e) => onSelectMethod(Number(e.target.value), false)}
-                        className="bg-[#181614] border border-[#2E2A26] rounded-lg px-3 py-1.5 font-mono text-xs text-[#EAE5DE] focus:outline-none focus:border-[#C5A880] max-w-md truncate"
-                      >
-                        {parsedClass.methods.map((m, idx) => (
-                          <option key={idx} value={idx}>
-                            {m.name} {m.descriptor}
-                          </option>
-                        ))}
-                      </select>
+                      </span>
+                      <div className="relative min-w-0 max-w-md">
+                        <button
+                          type="button"
+                          aria-haspopup="listbox"
+                          aria-expanded={isMethodMenuOpen}
+                          aria-labelledby="method-select-label"
+                          onClick={() => setIsMethodMenuOpen((prev) => !prev)}
+                          className={`w-full flex items-center justify-between gap-3 bg-[#181614] hover:bg-[#1C1A17] border rounded-lg px-3 py-1.5 font-mono text-xs text-[#EAE5DE] transition-colors cursor-pointer focus:outline-none ${
+                            isMethodMenuOpen ? "border-[#C5A880]" : "border-[#2E2A26] hover:border-[#3D3732]"
+                          }`}
+                        >
+                          <span className="truncate">
+                            {selectedMethod.name} {selectedMethod.descriptor}
+                          </span>
+                          <ChevronDown
+                            className={`w-3.5 h-3.5 text-[#A69E94] shrink-0 transition-transform duration-150 ${
+                              isMethodMenuOpen ? "rotate-180 text-[#C5A880]" : ""
+                            }`}
+                          />
+                        </button>
+
+                        {isMethodMenuOpen && (
+                          <div
+                            role="listbox"
+                            aria-labelledby="method-select-label"
+                            className="absolute left-0 top-full mt-1.5 min-w-full w-max max-w-[min(90vw,36rem)] max-h-72 overflow-y-auto rounded-lg bg-[#181614] border border-[#2E2A26] shadow-2xl py-1 z-30"
+                          >
+                            {parsedClass.methods.map((m, idx) => {
+                              const isSelected = idx === selectedMethodIdx;
+                              return (
+                                <button
+                                  key={idx}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={isSelected}
+                                  onClick={() => {
+                                    onSelectMethod(idx, false);
+                                    setIsMethodMenuOpen(false);
+                                  }}
+                                  className={`w-full px-3 py-2 flex items-center justify-between gap-3 text-left font-mono text-xs transition-colors cursor-pointer ${
+                                    isSelected
+                                      ? "bg-[#221F1C] text-[#C5A880]"
+                                      : "text-[#C4BCB3] hover:bg-[#1F1C1A] hover:text-[#EAE5DE]"
+                                  }`}
+                                >
+                                  <span className="truncate">
+                                    {m.name} {m.descriptor}
+                                  </span>
+                                  {isSelected && <Check className="w-3.5 h-3.5 text-[#C5A880] shrink-0" />}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     {selectedMethod.code && (

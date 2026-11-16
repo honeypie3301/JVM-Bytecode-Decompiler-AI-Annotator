@@ -307,10 +307,41 @@ export default function App() {
     );
 
     try {
+      const compactClassData = {
+        thisClassName: targetFile.parsedClass.thisClassName,
+        superClassName: targetFile.parsedClass.superClassName,
+        interfaces: targetFile.parsedClass.interfaces,
+        jdkVersion: targetFile.parsedClass.jdkVersion,
+        majorVersion: targetFile.parsedClass.majorVersion,
+        accessFlagsNames: targetFile.parsedClass.accessFlagsNames,
+        fields: targetFile.parsedClass.fields.map((f) => ({
+          name: f.name,
+          descriptor: f.descriptor,
+          accessFlagsNames: f.accessFlagsNames,
+        })),
+        methods: targetFile.parsedClass.methods.map((m) => ({
+          name: m.name,
+          descriptor: m.descriptor,
+          accessFlagsNames: m.accessFlagsNames,
+          code: m.code
+            ? {
+                maxStack: m.code.maxStack,
+                maxLocals: m.code.maxLocals,
+                ...(m.code.exceptionTable.length > 0 ? { exceptionTable: m.code.exceptionTable } : {}),
+                instructions: m.code.instructions.map((inst) => ({
+                  offset: inst.offset,
+                  mnemonic: inst.mnemonic,
+                  ...(inst.details ? { details: inst.details } : {}),
+                })),
+              }
+            : undefined,
+        })),
+      };
+
       const res = await fetch("/api/decompile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ classData: targetFile.parsedClass }),
+        body: JSON.stringify({ classData: compactClassData }),
       });
 
       if (!res.ok) {
@@ -465,8 +496,7 @@ export default function App() {
 
       {/* Quiet Footer */}
       <footer className="border-t border-[#2A2623] bg-[#141210] px-6 py-2.5 shrink-0">
-        <div className="max-w-[1600px] mx-auto flex items-center justify-between text-[11px] text-[#706961]">
-          <span>JadAI · JVM Bytecode Decompiler</span>
+        <div className="max-w-[1600px] mx-auto flex items-center justify-end text-[11px] text-[#706961]">
           <button
             type="button"
             onClick={() => setShowSamplesModal(true)}

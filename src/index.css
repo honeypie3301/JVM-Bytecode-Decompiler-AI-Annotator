@@ -12,6 +12,7 @@
     background-color: #11100f;
     color: #eae5de;
     font-family: var(--font-sans);
+    color-scheme: dark;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
@@ -47,6 +48,10 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: #3d3732;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

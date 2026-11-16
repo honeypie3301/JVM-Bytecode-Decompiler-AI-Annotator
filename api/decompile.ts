@@ -142,61 +142,48 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const prompt = `
-You are an expert JVM bytecode decompiler and senior Java systems engineer specializing in Java reverse engineering, compiler design, and platform-level optimization.
-Your task is to reconstruct the original high-level Java source code from the provided parsed JVM class structure and disassembled bytecode instructions, and provide educational annotations.
+    const compactFields = (classData.fields || []).map((f: any) => ({
+      name: f.name,
+      descriptor: f.descriptor,
+      accessFlags: f.accessFlagsNames,
+    }));
 
-Here is the parsed class structure:
+    const compactMethods = (classData.methods || []).map((m: any) => ({
+      name: m.name,
+      descriptor: m.descriptor,
+      accessFlags: m.accessFlagsNames,
+      ...(m.code
+        ? {
+            maxStack: m.code.maxStack,
+            maxLocals: m.code.maxLocals,
+            ...(m.code.exceptionTable?.length ? { exceptionTable: m.code.exceptionTable } : {}),
+            instructions: m.code.instructions?.map((inst: any) => ({
+              offset: inst.offset,
+              mnemonic: inst.mnemonic,
+              ...(inst.details ? { details: inst.details } : {}),
+            })),
+          }
+        : {}),
+    }));
+
+    const prompt = `You are an expert JVM bytecode decompiler and senior Java systems engineer specializing in Java reverse engineering, compiler design, and platform-level optimization.
+Reconstruct the original high-level Java source code from the parsed JVM class structure and disassembled bytecode instructions, and provide educational annotations.
+
+Class Structure:
 - Class Name: ${classData.thisClassName}
 - Super Class: ${classData.superClassName}
-- Interfaces: ${JSON.stringify(classData.interfaces)}
+- Interfaces: ${JSON.stringify(classData.interfaces || [])}
 - JDK Target Version: ${classData.jdkVersion} (Major version: ${classData.majorVersion})
-- Access Modifiers/Flags: ${JSON.stringify(classData.accessFlagsNames)}
-
-Fields:
-${JSON.stringify(classData.fields, null, 2)}
-
-Methods and Disassembled Bytecode Mnemonic Instructions:
-${JSON.stringify(
-  classData.methods.map((m: any) => ({
-    name: m.name,
-    descriptor: m.descriptor,
-    accessFlags: m.accessFlagsNames,
-    maxStack: m.code?.maxStack,
-    maxLocals: m.code?.maxLocals,
-    exceptionTable: m.code?.exceptionTable,
-    instructions: m.code?.instructions?.map((inst: any) => ({
-      offset: inst.offset,
-      mnemonic: inst.mnemonic,
-      details: inst.details,
-    })),
-  })),
-  null,
-  2
-)}
+- Access Modifiers/Flags: ${JSON.stringify(classData.accessFlagsNames || [])}
+- Fields: ${JSON.stringify(compactFields)}
+- Methods & Bytecode: ${JSON.stringify(compactMethods)}
 
 Core Requirements:
 1. Reconstruct the complete, correct, and compilation-ready high-level Java source code. Preserve all class annotations, fields, initializers, exception handlers, and method signatures.
 2. Resolve local variables into natural, readable variable names (instead of 'local_0', 'local_1', etc.) based on how they are used in the bytecode.
-3. Incorporate standard Java control structures (like if-else, for/while loops, switch-cases, try-catch-finally blocks) by analyzing jump targets and branch conditions.
-4. Minecraft Mod Support: If this is a Minecraft mod element or MCreator-generated custom item, procedure, event handler, block, or entity (since the developer works extensively with Minecraft MCreator procedures and source code), recognize standard Forge/NeoForge/Fabric APIs, MCreator patterns, and add rich modding-specific code annotations!
-5. Provide detailed, elegant, inline Javadoc or comments explaining:
-   - What the code is doing.
-   - How specific JVM bytecodes map to high-level Java syntax (e.g., explaining how 'invokevirtual' or 'invokedynamic' represents lambdas or method calls).
-   - Any compiler artifacts (like synthetic bridge methods, string concatenation optimizations).
-6. Format your response as a valid JSON object with the following fields:
-   - "javaSource": "The fully reconstructed Java source code string"
-   - "classSummary": "A concise, developer-friendly summary of the class's purpose, design, and compiler details"
-   - "annotations": [
-       {
-         "method": "Name of the method being explained",
-         "concept": "High-level concept (e.g., 'String Concatenation Optimization' or 'Exception Handling Flow')",
-         "explanation": "Detailed explanation of the JVM bytecode mechanics used for this concept"
-       }
-     ]
-
-Ensure the output is strictly valid JSON in the response, matching the JSON schema. Do not enclose the JSON inside a markdown block like \`\`\`json.
-`;
+3. Incorporate standard Java control structures (if-else, for/while loops, switch-cases, try-catch-finally) by analyzing jump targets and branch conditions.
+4. Minecraft Mod Support: If this is a Minecraft mod element or MCreator-generated custom item, procedure, event handler, block, or entity, recognize standard Forge/NeoForge/Fabric APIs and MCreator patterns and add modding-specific annotations.
+5. Provide concise inline Javadoc or comments explaining what the code does, how specific JVM bytecodes map to high-level Java syntax, and any compiler artifacts (synthetic bridges, string concatenation optimizations).`;
 
     let lastError: unknown;
 
@@ -219,8 +206,18 @@ Ensure the output is strictly valid JSON in the response, matching the JSON sche
           throw new Error("Empty response from primary Gemini model");
         } catch (err) {
           lastError = err;
+          const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+          if (
+            msg.includes("429") ||
+            msg.includes("503") ||
+            msg.includes("resource_exhausted") ||
+            msg.includes("unavailable") ||
+            msg.includes("overloaded")
+          ) {
+            break;
+          }
           if (attempt === 0) {
-            await sleep(750);
+            await sleep(250);
           }
         }
       }
