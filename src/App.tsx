@@ -12,6 +12,9 @@ import { AuditModal } from "./components/AuditModal";
 import { ThreatModal } from "./components/ThreatModal";
 import { SamplesModal } from "./components/SamplesModal";
 
+const API_BASE = ((import.meta as any).env?.VITE_API_BASE_URL || "").replace(/\/+$/, "");
+const DECOMPILE_API_URL = `${API_BASE}/api/decompile`;
+
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   const chunkSize = 0x8000;
@@ -357,7 +360,7 @@ export default function App() {
     );
 
     try {
-      const res = await fetch("/api/decompile", {
+      const res = await fetch(DECOMPILE_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -409,6 +412,11 @@ export default function App() {
             )
           );
           return;
+        }
+        if (res.status === 404) {
+          throw new Error(
+            "Decompilation endpoint (/api/decompile) not found. Static hosts like GitHub Pages require VITE_API_BASE_URL pointing to a running backend or local execution via start.bat."
+          );
         }
         throw new Error(errData.error || "CFR decompilation failed.");
       }
@@ -475,7 +483,7 @@ export default function App() {
 
     setAnnotatingFileId(fileId);
     try {
-      const res = await fetch("/api/decompile", {
+      const res = await fetch(DECOMPILE_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -490,6 +498,11 @@ export default function App() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
+        if (res.status === 404) {
+          throw new Error(
+            "AI annotation endpoint (/api/decompile) not found. Static hosts require VITE_API_BASE_URL or local execution via start.bat."
+          );
+        }
         throw new Error(errData.error || "Failed to generate AI summary and annotations.");
       }
 

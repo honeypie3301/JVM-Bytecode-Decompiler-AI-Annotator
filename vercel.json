@@ -1,5 +1,16 @@
 {
+  "installCommand": "npm install",
+  "buildCommand": "npm run build:static",
+  "outputDirectory": "dist",
+  "framework": "vite",
   "cleanUrls": true,
+  "functions": {
+    "api/decompile.ts": {
+      "includeFiles": "bin/**",
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
   "rewrites": [
     {
       "source": "/api/decompile",

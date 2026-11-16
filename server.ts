@@ -141,7 +141,13 @@ async function callGptOssFallback(
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const isHostedPreview = Boolean(
+    process.env.K_SERVICE ||
+      process.env.CLOUD_RUN_JOB ||
+      (process.env.APP_URL && process.env.APP_URL.includes(".run.app"))
+  );
+  const parsedPort = Number(process.env.JADAI_PORT || process.env.PORT);
+  const PORT = isHostedPreview ? 3000 : Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 4730;
 
   app.use(express.json({ limit: "50mb" }));
 
@@ -405,8 +411,10 @@ Answer the user's questions about this class, explain specific bytecode structur
     }
   });
 
+  const isCompiledServer = process.argv[1]?.replace(/\\/g, "/").endsWith("/server.cjs") ?? false;
+
   // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== "production" && !isCompiledServer) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
